@@ -59,7 +59,9 @@ jobs:
           ls -l "$SDKMANAGER"
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --version
           printf 'y\n%.0s' {1..60} | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install "platforms;android-37" "platform-tools" "build-tools;36.0.0"
+          # Android 37 packages are versioned as android-37.0/37.1/37.2 in the Google repo,
+          # so use the concrete platform package name the toolchain accepts.
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install "platforms;android-37.0" "platform-tools" "build-tools;36.0.0"
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --list_installed
 
       - name: Set up Gradle
