@@ -36,9 +36,9 @@ jobs:
           fi
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          mkdir -p "$ANDROID_HOME/cmdline-tools" "$HOME/.android"
           rm -rf "$ANDROID_HOME/cmdline-tools/latest" "$ANDROID_HOME/cmdline-tools/tmp"
-          rm -f "$ANDROID_HOME/repositories.cfg" "$HOME/.android/repositories.cfg"
+          rm -f "$ANDROID_HOME/repositories.cfg" "$ANDROID_HOME/repositories2-3.xml" "$ANDROID_HOME/repository2-3.xml" "$HOME/.android/repositories.cfg" "$HOME/.android/repositories2-3.xml" "$HOME/.android/repository2-3.xml"
 
           TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
           curl -fsSL "$TOOLS_URL" -o /tmp/cmdline-tools.zip
