@@ -53,10 +53,12 @@ jobs:
         run: |
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           hash -r
-          sdkmanager --version
-          printf 'y\n%.0s' {1..60} | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "platform-tools" "build-tools;36.0.0"
-          sdkmanager --list_installed
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls -l "$SDKMANAGER"
+          "$SDKMANAGER" --version
+          printf 'y\n%.0s' {1..60} | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "platform-tools" "build-tools;36.0.0"
+          "$SDKMANAGER" --list_installed
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
