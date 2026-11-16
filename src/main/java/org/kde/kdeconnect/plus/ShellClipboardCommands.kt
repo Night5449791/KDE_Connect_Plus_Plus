@@ -21,13 +21,14 @@ internal object ShellClipboardCommands {
     fun set(text: String): String = SET_PREFIX + quote(text)
 
     /**
-     * `cmd clipboard get-primary-clip` prints the clip on one line. Anything that looks like the
-     * command's own error output is treated as "no content".
+     * `cmd clipboard get-primary-clip` prints the clip and trims the trailing newline. Multi-line
+     * content comes back as several lines, so only the final newline is dropped, not internal
+     * whitespace. Anything that looks like the command's own error output is "no content".
      */
     fun parseGet(output: String?): String? {
-        val trimmed = output?.trim() ?: return null
-        if (trimmed.isEmpty()) return null
-        if (trimmed.startsWith("Exception") || trimmed.startsWith("Error")) return null
-        return trimmed
+        val trimmedEnd = output?.trimEnd() ?: return null
+        if (trimmedEnd.isEmpty()) return null
+        if (trimmedEnd.startsWith("Exception") || trimmedEnd.startsWith("Error")) return null
+        return trimmedEnd
     }
 }
