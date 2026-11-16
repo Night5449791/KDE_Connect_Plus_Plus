@@ -1,0 +1,376 @@
+From 840ca5549a51cd713311c27591e55651a9ee262d Mon Sep 17 00:00:00 2001
+From: cagedbird043 <cagedbird043@gmail.com>
+Date: Thu, 29 Oct 2026 18:10:18 +0800
+Subject: [PATCH 4/5] =?UTF-8?q?=E8=87=AA=E5=8A=A8=E5=8C=96(plus)=EF=BC=9A?=
+ =?UTF-8?q?=E8=87=AA=E5=8A=A8=E8=B7=9F=E8=BF=9B=E5=AE=98=E6=96=B9=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E5=B9=B6=E5=8F=91=E5=B8=83=E7=AD=BE=E5=90=8D=20APK?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- plus-follow：每天从 invent.kde.org 检查新的正式版 tag，rebase 到下一个 tag、编译测试、
+  用部署钥匙推送 cagedbird/plus，再触发 plus-release；任何失败都会停用自身等待人工处理
+- plus-release：计算 vX.Y.Z-plus.N，编译签名 APK 并发布 GitHub Release，供 Obtainium 订阅
+- .github/plus/upstream-tag.sh：找出当前基础 tag 与下一个 tag
+- .agents/skills/plus-release：跟进失败、手动发版与发布后检查的操作步骤
+---
+ .agents/skills/plus-release/SKILL.md |  68 +++++++++++++++++
+ .github/plus/upstream-tag.sh         |  42 +++++++++++
+ .github/workflows/plus-follow.yml    | 106 ++++++++++++++++++++++++++
+ .github/workflows/plus-release.yml   | 107 +++++++++++++++++++++++++++
+ 4 files changed, 323 insertions(+)
+ create mode 100644 .agents/skills/plus-release/SKILL.md
+ create mode 100755 .github/plus/upstream-tag.sh
+ create mode 100644 .github/workflows/plus-follow.yml
+ create mode 100644 .github/workflows/plus-release.yml
+
+diff --git a/.agents/skills/plus-release/SKILL.md b/.agents/skills/plus-release/SKILL.md
+new file mode 100644
+index 00000000..98f7cc5f
+--- /dev/null
++++ b/.agents/skills/plus-release/SKILL.md
+@@ -0,0 +1,68 @@
++---
++name: plus-release
++description: 发布和验证 cagedbird043/kdeconnect-android 的 kdeconnect+（cagedbird/plus 分支）：跟进官方新版本、处理 plus-follow 失败、手动发 GitHub Release APK、检查签名与版本号。用户说“发布 kdeconnect+”“跟上游”“plus-follow 挂了”“发个新版 APK”时使用。推送或公开发布前确认用户已授权。
++compatibility: Git、gh、JDK 21+、Android SDK（platform 37、build-tools）、可选 adb + Waydroid 或真机。
++---
++
++# kdeconnect+ 发布流程
++
++规则以仓库根目录 `PLUS.md` 为准，本 skill 只给操作步骤。
++
++## 前置
++
++- 仓库 `cagedbird043/kdeconnect-android`，分支 `cagedbird/plus`；`gh` 命令始终带 `-R cagedbird043/kdeconnect-android`。
++- 官方 tag 从 invent 取：`git fetch --no-tags https://invent.kde.org/network/kdeconnect-android.git '+refs/tags/v*:refs/tags/v*'`。
++- 当前基础 tag：`.github/plus/upstream-tag.sh base`；下一个：`.github/plus/upstream-tag.sh select`。
++- 提交信息用中文，无 AI 署名；修改已有 plus 补丁用 fixup + `git rebase -i --autosquash <基础 tag>`。
++
++## 情况一：自动跟进正常
++
++`plus-follow` 每天自动跑，不需要人工操作。查看：
++
++```sh
++gh run list -R cagedbird043/kdeconnect-android --workflow plus-follow.yml --limit 5
++gh release list -R cagedbird043/kdeconnect-android --limit 5
++```
++
++## 情况二：plus-follow 失败（已自动停用）
++
++1. 看失败步骤：`gh run view <run-id> -R cagedbird043/kdeconnect-android --log-failed`。
++2. rebase 冲突：本地复现并解决，冲突多在 `PLUS.md` 列出的接入点。
++
++   ```sh
++   git fetch origin && git switch cagedbird/plus && git reset --hard origin/cagedbird/plus   # 确认没有本地未推送修改后再执行
++   old=$(git rev-parse HEAD)
++   git rebase --onto <next> <base> cagedbird/plus   # 解决冲突时保持每个 plus 补丁仍是独立提交
++   ```
++
++3. 本地验证：`./gradlew --no-daemon assembleDebug testDebugUnitTest`；涉及剪贴板时按 `PLUS.md` 用 Waydroid/真机实测。
++4. 推送：`git push --force-with-lease=cagedbird/plus:$old origin cagedbird/plus`。
++5. 发布：`gh workflow run plus-release.yml --ref cagedbird/plus -R cagedbird043/kdeconnect-android`，
++   用 `gh run watch <id> --exit-status` 等它成功。
++6. 重新启用：`gh workflow enable plus-follow.yml -R cagedbird043/kdeconnect-android`。
++   若还有更新的官方 tag，可手动 `gh workflow run plus-follow.yml` 继续前进。
++
++## 情况三：同一官方版本上发新版（plus 补丁有改动）
++
++1. 修改、fixup、autosquash，本地验证同上。
++2. 推送 `cagedbird/plus`（带租约），再手动运行 `plus-release.yml`；它会把 `N` 加一。
++
++## 发布后检查
++
++```sh
++tag=$(gh release list -R cagedbird043/kdeconnect-android --limit 1 --json tagName --jq '.[0].tagName')
++gh release download "$tag" -R cagedbird043/kdeconnect-android -p '*.apk' -p '*-mapping.txt' -D /tmp/plus-release --clobber
++apksigner verify --print-certs /tmp/plus-release/*.apk   # 证书 SHA-256 必须是 34c55840…2ae1
++aapt2 dump badging /tmp/plus-release/*.apk | head -1      # 包名 top.miceworld.kdeconnectplus，versionCode 比上一版大
++```
++
++证书指纹变了或 versionCode 没变大，说明发布有问题，不要让用户安装，先查原因。
++
++还原崩溃日志里的 `r8-map-id-…` 位置：用同一版本的 `*-mapping.txt` 跑 `retrace`（在 Android SDK 的 cmdline-tools 里）。
++
++## 签名密钥
++
++- 只存在仓库 Secrets（`PLUS_KEYSTORE_BASE64` 等）和用户的离线备份中，永远不要重新生成。
++- 本地签名构建所需的环境变量见 `PLUS.md`。
++
++只报告实际执行过的验证，失败或受环境限制的检查单列。
+diff --git a/.github/plus/upstream-tag.sh b/.github/plus/upstream-tag.sh
+new file mode 100755
+index 00000000..8ad13538
+--- /dev/null
++++ b/.github/plus/upstream-tag.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++# kdeconnect+：找出 cagedbird/plus 所基于的官方正式版本 tag，以及下一个要跟进的 tag。规则见 PLUS.md。
++#
++#   upstream-tag.sh base     输出当前基于的 tag，例如 v1.37.0
++#   upstream-tag.sh select   输出 base=<当前 tag> 与 next=<下一个更新的 tag，没有则为空>（GITHUB_OUTPUT 格式）
++#
++# 只认 vX.Y.Z 形式的正式版本 tag。
++set -euo pipefail
++
++release_tags() {
++	git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V
++}
++
++base_tag() {
++	local base=""
++	for tag in $(release_tags); do
++		if git merge-base --is-ancestor "$tag" HEAD; then
++			base="$tag"
++		fi
++	done
++	if [ -z "$base" ]; then
++		echo "no upstream release tag is an ancestor of HEAD" >&2
++		exit 1
++	fi
++	echo "$base"
++}
++
++case "${1:-}" in
++	base)
++		base_tag
++		;;
++	select)
++		base="$(base_tag)"
++		next="$(release_tags | sort -V | awk -v base="$base" 'found { print; exit } $0 == base { found = 1 }')"
++		echo "base=$base"
++		echo "next=$next"
++		;;
++	*)
++		echo "usage: $0 base|select" >&2
++		exit 2
++		;;
++esac
+diff --git a/.github/workflows/plus-follow.yml b/.github/workflows/plus-follow.yml
+new file mode 100644
+index 00000000..43c77576
+--- /dev/null
++++ b/.github/workflows/plus-follow.yml
+@@ -0,0 +1,106 @@
++# kdeconnect+：每天检查官方（invent.kde.org）有没有新的正式版本 tag，有就把 plus 补丁 rebase 上去、
++# 编译测试、推送 cagedbird/plus 并触发 plus-release。一次只前进一个 tag。
++# 任何一步失败都会停用本工作流，等人工处理后再手动启用。规则见 PLUS.md。
++name: plus-follow
++
++on:
++  schedule:
++    - cron: '23 3 * * *'
++  workflow_dispatch:
++
++concurrency:
++  group: plus-follow
++  cancel-in-progress: false
++
++permissions:
++  contents: read
++  actions: write
++
++env:
++  UPSTREAM_URL: https://invent.kde.org/network/kdeconnect-android.git
++  BRANCH: cagedbird/plus
++  GH_TOKEN: ${{ github.token }}
++
++jobs:
++  follow:
++    runs-on: ubuntu-24.04
++    steps:
++      - name: Require PLUS_DEPLOY_KEY
++        env:
++          DEPLOY_KEY: ${{ secrets.PLUS_DEPLOY_KEY }}
++        run: |
++          if [ -z "$DEPLOY_KEY" ]; then
++            echo "::error::Repository secret PLUS_DEPLOY_KEY is missing (write deploy key)."
++            exit 1
++          fi
++
++      # 用部署钥匙推送：官方 tag 之间可能改动 .github/workflows/，GITHUB_TOKEN 推不了。
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ env.BRANCH }}
++          fetch-depth: 0
++          ssh-key: ${{ secrets.PLUS_DEPLOY_KEY }}
++
++      - name: Select next upstream tag
++        id: select
++        run: |
++          git fetch --no-tags "$UPSTREAM_URL" '+refs/tags/v*:refs/tags/v*'
++          .github/plus/upstream-tag.sh select | tee -a "$GITHUB_OUTPUT"
++
++      - name: Rebase onto the new tag
++        id: rebase
++        if: steps.select.outputs.next != ''
++        env:
++          BASE: ${{ steps.select.outputs.base }}
++          NEXT: ${{ steps.select.outputs.next }}
++        run: |
++          git config user.name cagedbird043
++          git config user.email cagedbird043@gmail.com
++          echo "old=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
++          git rebase --onto "$NEXT" "$BASE" "$BRANCH"
++          echo "new=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
++          echo "Rebased $BRANCH from $BASE onto $NEXT" >> "$GITHUB_STEP_SUMMARY"
++
++      - uses: actions/setup-java@v5
++        if: steps.select.outputs.next != ''
++        with:
++          distribution: temurin
++          java-version: '21'
++      - uses: gradle/actions/setup-gradle@v4
++        if: steps.select.outputs.next != ''
++
++      - name: Build and test
++        if: steps.select.outputs.next != ''
++        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest
++
++      - name: Push
++        if: steps.select.outputs.next != ''
++        env:
++          OLD: ${{ steps.rebase.outputs.old }}
++        run: git push --force-with-lease="$BRANCH:$OLD" origin "$BRANCH"
++
++      - name: Release
++        if: steps.select.outputs.next != ''
++        env:
++          NEW: ${{ steps.rebase.outputs.new }}
++          REPO: ${{ github.repository }}
++        run: |
++          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
++          gh workflow run plus-release.yml --ref "$BRANCH" -R "$REPO"
++          run_id=""
++          for _ in $(seq 1 30); do
++            run_id="$(gh run list -R "$REPO" --workflow plus-release.yml --event workflow_dispatch --branch "$BRANCH" \
++              --json databaseId,headSha,createdAt \
++              --jq "[.[] | select(.headSha == \"$NEW\" and .createdAt >= \"$started\")] | sort_by(.createdAt) | last | .databaseId // empty")"
++            [ -n "$run_id" ] && break
++            sleep 5
++          done
++          [ -n "$run_id" ] || { echo "plus-release run did not appear"; exit 1; }
++          echo "plus-release run: $run_id" >> "$GITHUB_STEP_SUMMARY"
++          gh run watch "$run_id" -R "$REPO" --exit-status
++
++      - name: Disable plus-follow after failure
++        if: failure()
++        env:
++          REPO: ${{ github.repository }}
++        run: gh workflow disable plus-follow.yml -R "$REPO"
+diff --git a/.github/workflows/plus-release.yml b/.github/workflows/plus-release.yml
+new file mode 100644
+index 00000000..fbd4cb31
+--- /dev/null
++++ b/.github/workflows/plus-release.yml
+@@ -0,0 +1,107 @@
++# kdeconnect+：编译签名的 release APK，发布为 GitHub Release（供 Obtainium 订阅）。
++# 版本号 X.Y.Z-plus.N：X.Y.Z 是 cagedbird/plus 所基于的官方 tag，N 在已有 Release 的基础上加一。
++# 由 plus-follow 触发，也可以手动运行。规则见 PLUS.md。
++name: plus-release
++
++on:
++  workflow_dispatch:
++
++concurrency:
++  group: plus-release
++  cancel-in-progress: false
++
++permissions:
++  contents: write
++
++env:
++  UPSTREAM_URL: https://invent.kde.org/network/kdeconnect-android.git
++  GH_TOKEN: ${{ github.token }}
++
++jobs:
++  release:
++    runs-on: ubuntu-24.04
++    steps:
++      - name: Require cagedbird/plus
++        if: github.ref != 'refs/heads/cagedbird/plus'
++        run: |
++          echo "::error::plus-release only runs on cagedbird/plus."
++          exit 1
++
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Compute version
++        id: version
++        env:
++          REPO: ${{ github.repository }}
++        run: |
++          git fetch --no-tags "$UPSTREAM_URL" '+refs/tags/v*:refs/tags/v*'
++          base="$(.github/plus/upstream-tag.sh base)"
++          prefix="${base}-plus."
++          last="$(gh release list -R "$REPO" --limit 1000 --json tagName --jq '.[].tagName' \
++            | sed -n "s/^${prefix//./\\.}\([0-9]\+\)$/\1/p" | sort -n | tail -n1)"
++          n=$(( ${last:-0} + 1 ))
++          {
++            echo "n=$n"
++            echo "tag=${prefix}${n}"
++            echo "name=${base#v}-plus.${n}"
++          } >> "$GITHUB_OUTPUT"
++
++      - uses: actions/setup-java@v5
++        with:
++          distribution: temurin
++          java-version: '21'
++      - uses: gradle/actions/setup-gradle@v4
++
++      - name: Build signed release APK
++        env:
++          N: ${{ steps.version.outputs.n }}
++          KEYSTORE_BASE64: ${{ secrets.PLUS_KEYSTORE_BASE64 }}
++          PLUS_KEYSTORE_PASSWORD: ${{ secrets.PLUS_KEYSTORE_PASSWORD }}
++          PLUS_KEY_ALIAS: ${{ secrets.PLUS_KEY_ALIAS }}
++          PLUS_KEY_PASSWORD: ${{ secrets.PLUS_KEY_PASSWORD }}
++        run: |
++          if [ -z "$KEYSTORE_BASE64" ]; then
++            echo "::error::Repository secret PLUS_KEYSTORE_BASE64 is missing."
++            exit 1
++          fi
++          export PLUS_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
++          echo "$KEYSTORE_BASE64" | base64 -d > "$PLUS_KEYSTORE_FILE"
++          ./gradlew --no-daemon testDebugUnitTest assembleRelease -PplusRelease="$N"
++          rm -f "$PLUS_KEYSTORE_FILE"
++
++      - name: Verify APK
++        id: apk
++        env:
++          NAME: ${{ steps.version.outputs.name }}
++        run: |
++          apk="kdeconnect-plus-${NAME}.apk"
++          cp build/outputs/apk/release/kdeconnect-android-release.apk "$apk"
++          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
++          "$build_tools/apksigner" verify --print-certs "$apk" | tee -a "$GITHUB_STEP_SUMMARY"
++          "$build_tools/aapt2" dump badging "$apk" | head -n1 | tee -a "$GITHUB_STEP_SUMMARY"
++          echo "file=$apk" >> "$GITHUB_OUTPUT"
++          # R8 符号表：还原崩溃日志里混淆过的类名和行号。
++          mapping="kdeconnect-plus-${NAME}-mapping.txt"
++          cp build/outputs/mapping/release/mapping.txt "$mapping"
++          echo "mapping=$mapping" >> "$GITHUB_OUTPUT"
++
++      - name: Publish GitHub Release
++        env:
++          TAG: ${{ steps.version.outputs.tag }}
++          NAME: ${{ steps.version.outputs.name }}
++          FILE: ${{ steps.apk.outputs.file }}
++          MAPPING: ${{ steps.apk.outputs.mapping }}
++          REPO: ${{ github.repository }}
++        run: |
++          base="$(.github/plus/upstream-tag.sh base)"
++          notes="$(mktemp)"
++          {
++            echo "基于官方 KDE Connect Android ${base}。"
++            echo
++            echo "plus 补丁："
++            git log --reverse --format='- %s' "$base..HEAD"
++          } > "$notes"
++          gh release create "$TAG" "$FILE" "$MAPPING" -R "$REPO" --target "$(git rev-parse HEAD)" \
++            --title "KDE Connect+ $NAME" --notes-file "$notes"
+-- 
+2.56.1
+
