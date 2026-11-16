@@ -27,13 +27,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37 platform-tools build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
 
-      - name: Install SDK platform 37 and build tools
+      - name: Show SDK state
         run: |
-          sdkmanager --version
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "platform-tools"
-          sdkmanager "build-tools;37.0.0" || sdkmanager "build-tools;36.1.0"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           sdkmanager --list_installed
 
       - name: Set up Gradle
