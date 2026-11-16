@@ -1,6 +1,47 @@
-# KDE Connect - Android app
+# KDE Connect++ (Android)
 
-KDE Connect is a multi-platform app that allows your devices to communicate (eg: your phone and your computer).
+Personal build of the official KDE Connect Android app with a Shizuku-based clipboard bridge, so
+clipboard sync keeps working in the background on ROMs that block background clipboard access
+(ColorOS and similar).
+
+Upstream source is the official 1.37.3 tag. Not a fork of any "plus" project, no GitLab.
+
+## Differences from upstream
+
+- **Clipboard through Shizuku.** A Shizuku UserService watches and writes the primary clip with
+  the shell identity. On Android 10+ a background app cannot observe other apps' clipboard
+  writes; upstream works around that by parsing logcat with `READ_LOGS`, which most ROMs block.
+  - Shell mode (adb / wireless debugging): the service uses `ClipboardManager` directly.
+  - Root / Sui mode: uid 0 must never attach to the clipboard (Android 12+ wipes it), so the
+    service runs `cmd clipboard` instead.
+- **Auto relaunch.** The Shizuku binder-received callback rebinds the UserService and restarts
+  `BackgroundService`, so clipboard sync and device connections recover after a Shizuku or
+  system restart without opening the app.
+- **No echo.** A value written locally because a remote device sent it is not sent back.
+
+The package name stays `org.kde.kdeconnect_tp` on purpose. This build replaces the official app
+and cannot be installed alongside it: uninstall the official KDE Connect first.
+
+## Build
+
+```
+./gradlew assembleDebug
+```
+
+CI is `.github/workflows/build.yml` (unit tests + debug APK on every push). It needs JDK 21 and
+Android SDK platform 37.
+
+## On the phone
+
+1. Install and start [Shizuku](https://shizuku.rikka.app/) (adb or root).
+2. KDE Connect++ → clipboard plugin settings → grant Shizuku permission.
+3. The status line reads "Running. Background clipboard sync is active."
+
+Copy on either side; both directions sync without the app in the foreground.
+
+## License
+
+GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL, same as upstream.
 
 ## (Some) Features
 - **Shared clipboard**: copy and paste between your phone and your computer (or any other device).

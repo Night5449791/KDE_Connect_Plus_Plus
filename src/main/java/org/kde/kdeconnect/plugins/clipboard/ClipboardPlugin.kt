@@ -20,6 +20,7 @@ import org.kde.kdeconnect.NetworkPacket
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory.LoadablePlugin
 import org.kde.kdeconnect.plugins.clipboard.ClipboardListener.ClipboardObserver
+import org.kde.kdeconnect.plus.ShizukuClipboardBridge
 import org.kde.kdeconnect.ui.PluginSettingsFragment
 import org.kde.kdeconnect_tp.R
 
@@ -36,13 +37,19 @@ class ClipboardPlugin : Plugin() {
     override val settingsScope = SettingsScope.PER_DEVICE
 
     override fun getSettingsFragment(activity: Activity): PluginSettingsFragment {
-        return PluginSettingsFragment.newInstance(pluginKey, device.deviceId, R.xml.clipboardplugin_preferences)
+        // kdeconnect+ : use the subclass that appends the Shizuku section.
+        return ClipboardSettingsFragment.newInstance(
+            pluginKey, device.deviceId, R.xml.clipboardplugin_preferences
+        )
     }
 
     override fun onPacketReceived(np: NetworkPacket): Boolean {
         val content = np.getString("content")
         when (np.type) {
             (PACKET_TYPE_CLIPBOARD) -> {
+                // kdeconnect+ : remember the remote value so the local listener does not echo it
+                // straight back when the shell reports the write as a clipboard change.
+                lastAppliedFromRemote = content
                 ClipboardListener.instance(context).setText(content)
                 return true
             }
@@ -53,6 +60,7 @@ class ClipboardPlugin : Plugin() {
                     return false
                 }
                 if ("content" in np) { // change clipboard if content is in NetworkPacket
+                    lastAppliedFromRemote = content
                     ClipboardListener.instance(context).setText(content)
                 }
                 return true
@@ -60,6 +68,10 @@ class ClipboardPlugin : Plugin() {
             else -> throw UnsupportedOperationException("Unknown packet type: ${np.type}")
         }
     }
+
+    /** kdeconnect+ : last value written locally because a remote device sent it. */
+    @Volatile
+    private var lastAppliedFromRemote: String? = null
 
     private val observer: ClipboardObserver = object : ClipboardObserver {
         override fun clipboardChanged(content: String, contentType: ClipboardListener.ClipboardContentType) {
@@ -71,9 +83,15 @@ class ClipboardPlugin : Plugin() {
             ) {
                 return
             }
+            // kdeconnect+ : do not bounce a remote write back to the sender.
+            if (content == lastAppliedFromRemote) {
+                lastAppliedFromRemote = null
+                return
+            }
             propagateClipboard(content)
         }
     }
+
 
     @VisibleForTesting
     fun propagateClipboard(content: String) {
@@ -178,6 +196,15 @@ class ClipboardPlugin : Plugin() {
         private const val PACKET_TYPE_CLIPBOARD_CONNECT = "kdeconnect.clipboard.connect"
 
         fun canSyncAutomatically(context: Context): Boolean {
+            // kdeconnect+ : Shizuku gives us the shell identity, so background clipboard reads
+            // work without the READ_LOGS logcat hack.
+            if (ShizukuClipboardBridge.isReady()) {
+                return true
+            }
+            if (ShizukuClipboardBridge.isShizukuAvailable() && ShizukuClipboardBridge.hasPermission()) {
+                // Permission granted but the user service is still binding; treat as supported.
+                return true
+            }
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 return true
             }

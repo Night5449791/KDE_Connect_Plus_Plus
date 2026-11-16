@@ -20,6 +20,12 @@
 -keepattributes SourceFile,LineNumberTable,Signature,*Annotation*
 -keep class org.kde.kdeconnect.** {*;}
 
+# kdeconnect+ : Shizuku instantiates the UserService by class name, and the shell helper is
+# started by app_process with a class name argument.
+-keep class org.kde.kdeconnect.plus.** {*;}
+-keep class rikka.shizuku.** {*;}
+-dontwarn rikka.shizuku.**
+
 # SSHd requires mina, and mina uses reflection so some classes would get deleted
 -keep class org.apache.sshd.** {*;}
 -dontwarn org.apache.sshd.**

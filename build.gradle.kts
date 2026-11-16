@@ -49,6 +49,7 @@ android {
         viewBinding = true
         compose = true
         buildConfig = true
+        aidl = true
     }
 
     sourceSets.getByName("main") {
@@ -292,6 +293,10 @@ dependencies {
     implementation(libs.apache.sshd.scp)
     implementation(libs.apache.sshd.mina)
     implementation(libs.apache.mina.core)
+
+    // kdeconnect+ : Shizuku, used to talk to the clipboard with the shell identity.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
     implementation(libs.bcpkix.jdk18on) //For SSL certificate generation
 

@@ -27,6 +27,7 @@ import org.kde.kdeconnect.helpers.security.RsaHelper
 import org.kde.kdeconnect.helpers.security.SslHelper
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory
+import org.kde.kdeconnect.plus.ShizukuClipboardBridge
 import org.kde.kdeconnect.ui.ThemeUtil
 import org.kde.kdeconnect_tp.BuildConfig
 import org.slf4j.impl.HandroidLoggerAdapter
@@ -63,6 +64,12 @@ class KdeConnect : Application() {
         NotificationHelper.initializeChannels(this)
         LifecycleHelper.initializeObserver()
         loadRememberedDevicesFromSettings()
+
+        // kdeconnect+ : bind the Shizuku clipboard service as soon as the process starts, so
+        // clipboard sync survives a Shizuku restart without the user opening the UI. The bridge
+        // re-binds itself from the Shizuku binder-received listener.
+        runCatching { ShizukuClipboardBridge.install(this) }
+            .onFailure { Log.e("KdeConnect/Application", "Shizuku bridge install failed", it) }
 
         if (BuildConfig.DEBUG && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vmPolicyBuilder = VmPolicy.Builder(StrictMode.getVmPolicy())

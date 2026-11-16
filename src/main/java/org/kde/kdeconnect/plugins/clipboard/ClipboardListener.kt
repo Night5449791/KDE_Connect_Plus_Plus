@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.getSystemService
 import org.kde.kdeconnect.helpers.ThreadHelper
+import org.kde.kdeconnect.plus.ShizukuClipboardBridge
 import org.kde.kdeconnect_tp.BuildConfig
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -44,12 +45,42 @@ class ClipboardListener {
 
     private lateinit var cm: ClipboardManager
 
+    /**
+     * kdeconnect+ : when Shizuku is usable, the shell-side watcher is the source of truth for
+     * "the user copied something", because a background app on Android 10+ cannot observe other
+     * apps' clipboard writes. Updates coming from the shell are marked so the plugin does not
+     * echo them back to the remote device.
+     */
+    private val shizukuListener = object : ShizukuClipboardBridge.Listener {
+        override fun onShellClipboardChanged(text: String) {
+            if (text == currentContent && currentContentType == ClipboardContentType.Text) {
+                return
+            }
+            updateTimestamp = System.currentTimeMillis()
+            currentContent = text
+            currentContentType = ClipboardContentType.Text
+            lastChangeFromShizuku = true
+            for (observer in observers) {
+                observer.clipboardChanged(text, ClipboardContentType.Text)
+            }
+        }
+    }
+
+    /** True when the most recent clipboard change was observed through Shizuku. */
+    @Volatile
+    var lastChangeFromShizuku: Boolean = false
+        internal set
+
     private constructor(ctx: Context) {
         context = ctx.applicationContext
         Handler(Looper.getMainLooper()).post {
             cm = context.getSystemService<ClipboardManager>()!!
             cm.addPrimaryClipChangedListener { this.onClipboardChanged() }
         }
+        // kdeconnect+ : start the Shizuku clipboard path as early as possible so background
+        // copies are picked up even when the activity is not running.
+        ShizukuClipboardBridge.install(context)
+        ShizukuClipboardBridge.addListener(shizukuListener)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ClipboardPlugin.canSyncAutomatically(context)) {
             ThreadHelper.runOnNewThread {
                 try {
@@ -89,6 +120,7 @@ class ClipboardListener {
             updateTimestamp = System.currentTimeMillis()
             currentContent = content
             currentContentType = contentType
+            lastChangeFromShizuku = false
 
             for (observer in observers) {
                 observer.clipboardChanged(content, contentType)
@@ -98,17 +130,26 @@ class ClipboardListener {
         }
     }
 
+    /**
+     * kdeconnect+ : write a remote clipboard value into the phone clipboard. On Android 10+ a
+     * background app is blocked from writing (ColorOS and similar ROMs simply drop it), so the
+     * write goes through the Shizuku shell first and only falls back to ClipboardManager.
+     */
     fun setText(text: String?) {
-        if (this::cm.isInitialized) {
-            if (text == currentContent) {
-                return
-            }
-            updateTimestamp = System.currentTimeMillis()
-            currentContent = text
-            currentContentType = ClipboardContentType.Text
-            cm.setPrimaryClip(ClipData.newPlainText(null, text))
+        if (text == currentContent) {
+            return
+        }
+        updateTimestamp = System.currentTimeMillis()
+        currentContent = text
+        currentContentType = ClipboardContentType.Text
+        lastChangeFromShizuku = false
+
+        val writtenByShell = text != null && ShizukuClipboardBridge.writeText(text)
+        if (!writtenByShell && this::cm.isInitialized) {
+            runCatching { cm.setPrimaryClip(ClipData.newPlainText(null, text)) }
         }
     }
+
 
     companion object {
         private var _instance: ClipboardListener? = null
