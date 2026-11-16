@@ -25,18 +25,31 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform 37
+      - name: Configure Android SDK
         run: |
-          # The preinstalled cmdline-tools (16.0) does not know about android-37;
-          # upgrade to the latest command-line tools before installing anything.
-          sdkmanager --install "cmdline-tools;latest"
+          # The ubuntu runner ships an SDK, and its cmdline-tools (16.0) cannot see
+          # android-37. Bootstrap a current cmdline-tools from the official zip instead
+          # of asking the old sdkmanager, which trips over the removed legacy "tools".
+          if [ -z "$ANDROID_HOME" ]; then
+            ANDROID_HOME=/usr/local/lib/android/sdk
+            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          fi
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
+          rm -rf "$ANDROID_HOME/cmdline-tools/latest" "$ANDROID_HOME/cmdline-tools/tmp"
+          mkdir -p "$ANDROID_HOME/cmdline-tools/tmp"
+          curl -fsSL "$TOOLS_URL" -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools/tmp"
+          mv "$ANDROID_HOME/cmdline-tools/tmp/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          rm -rf "$ANDROID_HOME/cmdline-tools/tmp" /tmp/cmdline-tools.zip
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Install SDK packages
+        run: |
           sdkmanager --version
-          printf 'y\n%.0s' {1..50} | sdkmanager --licenses > /dev/null || true
+          printf 'y\n%.0s' {1..60} | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-37" "platform-tools" "build-tools;36.0.0"
           sdkmanager --list_installed
 
