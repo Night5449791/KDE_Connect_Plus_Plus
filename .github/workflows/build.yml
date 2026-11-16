@@ -27,14 +27,17 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: 'platforms;android-37 platform-tools build-tools;36.0.0'
-          log-accepted-android-sdk-licenses: false
 
-      - name: Show SDK state
+      - name: Install SDK platform 37
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          # The preinstalled cmdline-tools (16.0) does not know about android-37;
+          # upgrade to the latest command-line tools before installing anything.
+          sdkmanager --install "cmdline-tools;latest"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          sdkmanager --version
+          printf 'y\n%.0s' {1..50} | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "platform-tools" "build-tools;36.0.0"
           sdkmanager --list_installed
 
       - name: Set up Gradle
