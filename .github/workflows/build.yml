@@ -43,11 +43,16 @@ jobs:
           unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools/tmp"
           mv "$ANDROID_HOME/cmdline-tools/tmp/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
           rm -rf "$ANDROID_HOME/cmdline-tools/tmp" /tmp/cmdline-tools.zip
+
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          hash -r
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
       - name: Install SDK packages
         run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          hash -r
           sdkmanager --version
           printf 'y\n%.0s' {1..60} | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-37" "platform-tools" "build-tools;36.0.0"
