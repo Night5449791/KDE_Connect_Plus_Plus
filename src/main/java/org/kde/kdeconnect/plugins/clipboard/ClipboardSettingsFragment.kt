@@ -71,7 +71,7 @@ class ClipboardSettingsFragment : PluginSettingsFragment() {
             ShizukuClipboardBridge.isReady() -> R.string.plus_shizuku_status_ready
             else -> R.string.plus_shizuku_status_binding
         }
-        preference.post { preference.summary = getString(text) }
+        activity?.runOnUiThread { preference.summary = getString(text) }
     }
 
     companion object {
