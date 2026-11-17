@@ -18,7 +18,7 @@ plus/ 与 .plus-patches/ 已删除，相关实现按官方代码结构并入 `sr
 | 接入官方 ClipboardPlugin | `plugins/clipboard/ClipboardPlugin.kt` |
 | Shizuku 设置区块 | `plugins/clipboard/ClipboardSettingsFragment.kt` |
 | Manifest provider | `AndroidManifest.xml` |
-| 依赖 | `gradle/libs.versions.toml`（shizuku 13.6.0） |
+| 依赖 | `gradle/libs.versions.toml`（shizuku 13.1.5） |
 
 ### 设计要点
 
