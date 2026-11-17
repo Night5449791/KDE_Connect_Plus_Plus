@@ -60,7 +60,7 @@ class ClipboardSettingsFragment : PluginSettingsFragment() {
     override fun onResume() {
         super.onResume()
         // Shizuku permission is granted in another activity; re-check when we come back.
-        ThreadHelper.execute { refreshRunnable }
+        ThreadHelper.runOnNewThread(refreshRunnable)
     }
 
     private fun refresh() {

@@ -155,7 +155,7 @@ object ShizukuClipboardBridge {
     fun readText(): String? = runCatching { service?.getPrimaryClipText() }.getOrNull()
 
     fun writeText(text: String): Boolean =
-        runCatching { service?.setPrimaryClipText(text) }.getOrDefault(false)
+        runCatching { service?.setPrimaryClipText(text) }.getOrNull() ?: false
 
     @Synchronized
     fun ensureBound() {
