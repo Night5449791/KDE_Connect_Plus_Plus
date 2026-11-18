@@ -55,7 +55,7 @@ internal class ShellWatchdog {
     private fun safeCheck() {
         runCatching {
             if (isServiceRunning()) {
-                Log.d(TAG, "BackgroundService alive")
+                Log.i(TAG, "BackgroundService alive")
             } else {
                 Log.i(TAG, "BackgroundService not running, relaunching")
                 relaunch()
@@ -93,8 +93,22 @@ internal class ShellWatchdog {
         val process = ProcessBuilder("/system/bin/sh", "-c", command)
             .redirectErrorStream(true)
             .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        process.waitFor(COMMAND_TIMEOUT_S, TimeUnit.SECONDS)
+        // Wait FIRST with a timeout. Reading the stream before waitFor() can block forever when
+        // `am start-foreground-service` starts a service that inherits stdout — that would hang
+        // the single-threaded executor and stop all future watchdog checks.
+        val finished = process.waitFor(COMMAND_TIMEOUT_S, TimeUnit.SECONDS)
+        if (!finished) {
+            Log.w(TAG, "exec timed out, destroying: $command")
+            process.destroyForcibly()
+        }
+        // Drain whatever is available without blocking again.
+        val available = process.inputStream.available()
+        val output = if (available > 0) {
+            ByteArray(available).let { buf ->
+                val n = process.inputStream.read(buf)
+                if (n > 0) String(buf, 0, n) else ""
+            }
+        } else ""
         output.trim().ifEmpty { null }
     }.onFailure { Log.w(TAG, "exec failed: $command", it) }.getOrNull()
 
