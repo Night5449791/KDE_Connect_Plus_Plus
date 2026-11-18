@@ -41,4 +41,13 @@ class ShellClipboardAccessTest {
             ShellClipboardAccess.planArgs("SSI"),
         )
     }
+
+    @Test
+    fun planArgsHandlesVivoSignatureWithBoolean() {
+        // vivo appends a boolean parameter; it must be filled with false, never null.
+        assertEquals(
+            listOf("clip", "callingPackage", "attributionTag", "userId", "deviceId", "boolean"),
+            ShellClipboardAccess.planArgs("CSSIIB"),
+        )
+    }
 }

@@ -56,8 +56,8 @@ internal object ShellClipboardAccess {
             setMethod = svc.javaClass.methods.firstOrNull { it.name == "setPrimaryClip" }
             Log.i(
                 TAG,
-                "IClipboard ready (get=${getMethod?.parameterTypes?.size} params, " +
-                    "set=${setMethod?.parameterTypes?.size} params)",
+                "IClipboard ready get(${getMethod?.parameterTypes?.joinToString { it.name }}) " +
+                    "set(${setMethod?.parameterTypes?.joinToString { it.name }})",
             )
             true
         } catch (t: Throwable) {
@@ -97,33 +97,38 @@ internal object ShellClipboardAccess {
         }
     }
 
-    /** Map parameter types to their roles: C=ClipData, S=String, I=int. */
-    private fun signatureOf(method: Method): String =
-        method.parameterTypes.joinToString("") { type ->
+    /**
+     * Map every parameter to a concrete value by its type. Vendors (notably vivo) append extra
+     * parameters to the AOSP signature, so we must never leave a primitive as null: reflection
+     * throws IllegalArgumentException if a primitive receives null even though the call would
+     * otherwise work. Rules:
+     *   - ClipData -> the clip to write (read has none)
+     *   - first String -> calling package "com.android.shell"; later Strings -> null attribution tags
+     *   - first int -> user id; later ints -> device id / defaults (all 0)
+     *   - boolean and any other primitive -> false / 0 boxed value
+     *   - any other reference type -> null
+     */
+    private fun buildArgs(method: Method, clip: ClipData?): Array<Any?> {
+        var strings = 0
+        var ints = 0
+        return method.parameterTypes.map { type ->
             when (type) {
-                ClipData::class.java -> "C"
-                String::class.java -> "S"
-                Integer.TYPE -> "I"
-                else -> "?"
-            }
-        }
-
-    private fun buildArgs(method: Method, clip: ClipData?): Array<Any?> =
-        planArgs(signatureOf(method)).map { role ->
-            when (role) {
-                "clip" -> clip
-                "callingPackage" -> SHELL_PACKAGE
-                "userId" -> USER_ID
-                "deviceId" -> DEVICE_ID_DEFAULT
-                else -> null // attributionTag and unknown parameters stay null
+                ClipData::class.java -> clip
+                String::class.java -> if (strings++ == 0) SHELL_PACKAGE else null
+                Integer.TYPE -> if (ints++ == 0) USER_ID else DEVICE_ID_DEFAULT
+                java.lang.Boolean.TYPE -> false
+                java.lang.Long.TYPE -> 0L
+                java.lang.Float.TYPE -> 0f
+                java.lang.Double.TYPE -> 0.0
+                java.lang.Short.TYPE -> 0.toShort()
+                java.lang.Byte.TYPE -> 0.toByte()
+                java.lang.Character.TYPE -> '\u0000'
+                else -> null
             }
         }.toTypedArray()
+    }
 
-    /**
-     * Decide each argument's role from the signature alone. The first String is the calling
-     * package, a second String is the attribution tag; the first int is the user id, the second
-     * is the device id. Exposed for unit tests.
-     */
+    /** Roles for a signature string (C=ClipData, S=String, I=int, B=boolean, ?=other). Exposed for tests. */
     internal fun planArgs(signature: String): List<String> {
         var strings = 0
         var ints = 0
@@ -132,6 +137,7 @@ internal object ShellClipboardAccess {
                 'C' -> "clip"
                 'S' -> if (strings++ == 0) "callingPackage" else "attributionTag"
                 'I' -> if (ints++ == 0) "userId" else "deviceId"
+                'B' -> "boolean"
                 else -> "unknown"
             }
         }
