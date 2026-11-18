@@ -54,13 +54,22 @@ internal class ShellWatchdog {
 
     private fun safeCheck() {
         runCatching {
-            if (isServiceRunning()) {
+            diag("check at ${System.currentTimeMillis()}")
+            val running = isServiceRunning()
+            diag("isServiceRunning=$running")
+            if (running) {
                 Log.i(TAG, "BackgroundService alive")
             } else {
                 Log.i(TAG, "BackgroundService not running, relaunching")
                 relaunch()
             }
-        }.onFailure { Log.w(TAG, "watchdog check failed", it) }
+        }.onFailure { Log.w(TAG, "watchdog check failed", it); diag("check FAILED: $it") }
+    }
+
+    private fun diag(msg: String) {
+        runCatching { java.io.FileOutputStream("/data/local/tmp/kc_watchdog_diag.txt", true).use {
+            it.write((msg + "\n").toByteArray())
+        } }
     }
 
     /** Use `dumpsys activity services` rather than ActivityManager.getRunningServices (limited). */
@@ -72,12 +81,13 @@ internal class ShellWatchdog {
 
     private fun relaunch() {
         // 1) Clear the stopped state (vivo force-stop / never-opened app). Android 13+.
-        exec("cmd package unstop --user 0 $packageName")
+        diag("unstop: " + exec("cmd package unstop --user 0 $packageName"))
         // 2) Apply the same bypasses again in case the ROM reset them.
         applyBypasses()
         // 3) Shell identity is exempt from background-FGS start restrictions, but the service
         //    must be exported and must call startForeground() within a few seconds.
         val result = exec("am start-foreground-service --user 0 -n $serviceComponent")
+        diag("am result: $result")
         Log.i(TAG, "relaunch result: $result")
     }
 
