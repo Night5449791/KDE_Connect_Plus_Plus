@@ -73,7 +73,8 @@ internal object ShellClipboardAccess {
         val method = getMethod ?: return readPublic(context)
         return try {
             val clip = method.invoke(service, *buildArgs(method, null)) as? ClipData
-                ?: return readPublic(context)
+            Log.d(TAG, "IClipboard read raw clip=${clip?.description}, items=${clip?.itemCount}")
+            if (clip == null) return readPublic(context)
             if (clip.itemCount <= 0) return null
             val item = clip.getItemAt(0)
             // Plain text needs no Context; only content:// URIs need coerceToText.
