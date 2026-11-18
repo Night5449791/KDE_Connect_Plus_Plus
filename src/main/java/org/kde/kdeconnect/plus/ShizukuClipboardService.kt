@@ -192,11 +192,11 @@ internal class ShellCommandBackend : ClipboardBackend {
     /** Runs a shell command and returns its stdout. */
     private fun exec(command: String): String? = runCatching {
         val process = ProcessBuilder("sh", "-c", command)
-            .redirectErrorStream(false)
+            .redirectErrorStream(true)
             .start()
         val out = process.inputStream.bufferedReader().use { it.readText() }
-        process.waitFor()
-        out
+        val exitCode = process.waitFor()
+        if (exitCode != 0 || ShellClipboardCommands.isCommandError(out)) null else out
     }.onFailure { Log.w("KdeConnectPlus/Shell", "command failed: $command", it) }
         .getOrNull()
 }

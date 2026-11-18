@@ -20,6 +20,13 @@ internal object ShellClipboardCommands {
 
     fun set(text: String): String = SET_PREFIX + quote(text)
 
+    fun isCommandError(output: String?): Boolean {
+        val message = output?.trimStart() ?: return false
+        return message.startsWith("Exception") ||
+            message.startsWith("Error") ||
+            message.startsWith("No shell command implementation")
+    }
+
     /**
      * `cmd clipboard get-primary-clip` prints the clip and trims the trailing newline. Multi-line
      * content comes back as several lines, so only the final newline is dropped, not internal
@@ -27,8 +34,7 @@ internal object ShellClipboardCommands {
      */
     fun parseGet(output: String?): String? {
         val trimmedEnd = output?.trimEnd() ?: return null
-        if (trimmedEnd.isEmpty()) return null
-        if (trimmedEnd.startsWith("Exception") || trimmedEnd.startsWith("Error")) return null
+        if (trimmedEnd.isEmpty() || isCommandError(trimmedEnd)) return null
         return trimmedEnd
     }
 }
