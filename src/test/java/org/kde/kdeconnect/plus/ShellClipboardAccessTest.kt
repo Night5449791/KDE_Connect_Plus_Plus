@@ -50,4 +50,22 @@ class ShellClipboardAccessTest {
             ShellClipboardAccess.planArgs("CSSIIB"),
         )
     }
+
+    @Test
+    fun primitiveDefaultsAreNeverNull() {
+        // Regression: passing null for a primitive parameter makes Method.invoke throw
+        // IllegalArgumentException, which forced the app back onto the failing public API.
+        assertEquals(false, ShellClipboardAccess.primitiveDefault(java.lang.Boolean.TYPE))
+        assertEquals(0L, ShellClipboardAccess.primitiveDefault(java.lang.Long.TYPE))
+        assertEquals(0f, ShellClipboardAccess.primitiveDefault(java.lang.Float.TYPE))
+        assertEquals(0.0, ShellClipboardAccess.primitiveDefault(java.lang.Double.TYPE))
+        assertEquals(0.toShort(), ShellClipboardAccess.primitiveDefault(java.lang.Short.TYPE))
+        assertEquals(0.toByte(), ShellClipboardAccess.primitiveDefault(java.lang.Byte.TYPE))
+        assertEquals('\u0000', ShellClipboardAccess.primitiveDefault(java.lang.Character.TYPE))
+    }
+
+    @Test
+    fun referenceTypesStayNull() {
+        assertEquals(null, ShellClipboardAccess.primitiveDefault(String::class.java))
+    }
 }

@@ -73,7 +73,11 @@ internal object ShellClipboardAccess {
         val method = getMethod ?: return readPublic(context)
         return try {
             val clip = method.invoke(service, *buildArgs(method, null)) as? ClipData
-                ?: return readPublic(context)
+            // A null clip is a legitimate result (empty clipboard, locked device, no focus).
+            // Do NOT fall back to the public ClipboardManager here: it would use the app's op
+            // package name and throw "calling package does not match caller's uid". Fallback is
+            // only for reflection/invocation failures.
+            if (clip == null) return null
             if (clip.itemCount <= 0) return null
             val item = clip.getItemAt(0)
             // Plain text needs no Context; only content:// URIs need coerceToText.
@@ -116,16 +120,21 @@ internal object ShellClipboardAccess {
                 ClipData::class.java -> clip
                 String::class.java -> if (strings++ == 0) SHELL_PACKAGE else null
                 Integer.TYPE -> if (ints++ == 0) USER_ID else DEVICE_ID_DEFAULT
-                java.lang.Boolean.TYPE -> false
-                java.lang.Long.TYPE -> 0L
-                java.lang.Float.TYPE -> 0f
-                java.lang.Double.TYPE -> 0.0
-                java.lang.Short.TYPE -> 0.toShort()
-                java.lang.Byte.TYPE -> 0.toByte()
-                java.lang.Character.TYPE -> '\u0000'
-                else -> null
+                else -> primitiveDefault(type)
             }
         }.toTypedArray()
+    }
+
+    /** Non-null boxed default for any primitive parameter. Exposed for tests. */
+    internal fun primitiveDefault(type: Class<*>): Any? = when (type) {
+        java.lang.Boolean.TYPE -> false
+        java.lang.Long.TYPE -> 0L
+        java.lang.Float.TYPE -> 0f
+        java.lang.Double.TYPE -> 0.0
+        java.lang.Short.TYPE -> 0.toShort()
+        java.lang.Byte.TYPE -> 0.toByte()
+        java.lang.Character.TYPE -> '\u0000'
+        else -> null // reference types (attributionTag and unknown objects) stay null
     }
 
     /** Roles for a signature string (C=ClipData, S=String, I=int, B=boolean, ?=other). Exposed for tests. */
