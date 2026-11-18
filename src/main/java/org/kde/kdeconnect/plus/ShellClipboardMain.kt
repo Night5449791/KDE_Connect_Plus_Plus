@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 package org.kde.kdeconnect.plus
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -86,18 +84,14 @@ object ShellClipboardMain {
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     private fun runLoop(): Boolean {
-        val context: Context = currentApplication() ?: run {
-            System.err.println("no application context")
-            return false
-        }
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: run {
-            System.err.println("no clipboard service")
-            return false
-        }
+        // An app_process helper may have no Application. The binder path passes the calling
+        // package explicitly and works without one; the context is only used for content:// URIs
+        // and as the public-API fallback.
+        val context: Context? = currentApplication()
         val out = PrintStream(System.out, true, "UTF-8")
         val input = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
         out.println(READY)
-        var lastSeen = readClipboard(context, cm)
+        var lastSeen = readClipboard(context)
         while (true) {
             val line = input.readLine() ?: break
             val space = line.indexOf(' ')
@@ -105,20 +99,17 @@ object ShellClipboardMain {
             val arg = if (space < 0) null else line.substring(space + 1)
             when (cmd) {
                 CMD_READ -> {
-                    val text = readClipboard(context, cm)
+                    val text = readClipboard(context)
                     out.println(if (text == null) NONE else "$OK ${encodePayload(text)}")
                 }
                 CMD_WRITE -> {
                     val text = decodePayload(arg ?: "")
-                    val written = runCatching {
-                        cm.setPrimaryClip(ClipData.newPlainText(null, text))
-                        true
-                    }.getOrDefault(false)
+                    val written = ShellClipboardAccess.write(context, text)
                     if (written) lastSeen = text
                     out.println(if (written) OK else ERR)
                 }
                 CMD_POLL -> {
-                    val text = readClipboard(context, cm)
+                    val text = readClipboard(context)
                     if (text != null && text != lastSeen) {
                         lastSeen = text
                         out.println("$OK ${encodePayload(text)}")
@@ -133,11 +124,8 @@ object ShellClipboardMain {
         return true
     }
 
-    private fun readClipboard(context: Context, cm: ClipboardManager): String? = runCatching {
-        val clip = cm.primaryClip ?: return null
-        if (clip.itemCount <= 0) return null
-        clip.getItemAt(0).coerceToText(context).toString()
-    }.getOrNull()
+    private fun readClipboard(context: Context?): String? =
+        runCatching { ShellClipboardAccess.read(context) }.getOrNull()
 
     private fun currentApplication(): Context? = runCatching {
         val at = Class.forName("android.app.ActivityThread")

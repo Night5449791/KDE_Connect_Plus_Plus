@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 package org.kde.kdeconnect.plus
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
@@ -134,26 +132,24 @@ internal interface ClipboardBackend {
 
 /** Clipboard access from a process that already runs as the shell user. */
 internal class DirectClipboardBackend : ClipboardBackend {
+    // Keep the "com.android.shell" package context for coerceToText on content:// items and as
+    // the public-API fallback. The binder path itself passes the calling package explicitly.
     private val context: Context? = currentApplication()?.let { applicationContext ->
         runCatching { applicationContext.createPackageContext("com.android.shell", 0) }
             .onFailure { Log.e("KdeConnectPlus/ClipSvc", "cannot create shell package context", it) }
             .getOrNull()
     }
-    private val cm: ClipboardManager? =
-        context?.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 
     @Volatile private var lastSeen: String? = null
     private val readFailureLogged = AtomicBoolean(false)
 
     init {
-        Log.i("KdeConnectPlus/ClipSvc", "direct backend context=${context?.packageName}, clipboardManager=${cm != null}")
+        Log.i("KdeConnectPlus/ClipSvc", "direct backend context=${context?.packageName}")
         lastSeen = read()
     }
 
     override fun read(): String? = runCatching {
-        val clip = cm?.primaryClip ?: return null
-        if (clip.itemCount <= 0) return null
-        clip.getItemAt(0).coerceToText(context).toString()
+        ShellClipboardAccess.read(context)
     }.onFailure {
         if (readFailureLogged.compareAndSet(false, true)) {
             Log.w("KdeConnectPlus/ClipSvc", "direct clipboard read failed", it)
@@ -162,9 +158,9 @@ internal class DirectClipboardBackend : ClipboardBackend {
         .getOrNull()
 
     override fun write(text: String): Boolean = runCatching {
-        cm?.setPrimaryClip(ClipData.newPlainText(null, text))
-        lastSeen = text
-        true
+        val written = ShellClipboardAccess.write(context, text)
+        if (written) lastSeen = text
+        written
     }.getOrDefault(false)
 
     override fun pollChanged(): String? {
