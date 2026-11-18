@@ -134,7 +134,11 @@ internal interface ClipboardBackend {
 
 /** Clipboard access from a process that already runs as the shell user. */
 internal class DirectClipboardBackend : ClipboardBackend {
-    private val context: Context? = currentApplication()
+    private val context: Context? = currentApplication()?.let { applicationContext ->
+        runCatching { applicationContext.createPackageContext("com.android.shell", 0) }
+            .onFailure { Log.e("KdeConnectPlus/ClipSvc", "cannot create shell package context", it) }
+            .getOrNull()
+    }
     private val cm: ClipboardManager? =
         context?.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 
@@ -142,7 +146,7 @@ internal class DirectClipboardBackend : ClipboardBackend {
     private val readFailureLogged = AtomicBoolean(false)
 
     init {
-        Log.i("KdeConnectPlus/ClipSvc", "direct backend context=${context != null}, clipboardManager=${cm != null}")
+        Log.i("KdeConnectPlus/ClipSvc", "direct backend context=${context?.packageName}, clipboardManager=${cm != null}")
         lastSeen = read()
     }
 
