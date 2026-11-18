@@ -178,7 +178,7 @@ object ShizukuClipboardBridge {
             .processNameSuffix("clipboard")
             .debuggable(false)
             // Bump when the AIDL or the service implementation changes.
-            .version(1)
+            .version(2)
         runCatching {
             Shizuku.bindUserService(args, connection)
             Log.i(TAG, "bindUserService requested")
