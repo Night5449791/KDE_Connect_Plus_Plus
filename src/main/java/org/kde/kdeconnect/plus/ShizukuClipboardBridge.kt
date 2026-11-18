@@ -41,6 +41,7 @@ object ShizukuClipboardBridge {
 
     private val watcher = object : IClipboardWatcher.Stub() {
         override fun onClipboardChanged(text: String) {
+            Log.d(TAG, "clipboard watcher callback received (chars=${text.length})")
             for (listener in listeners) {
                 runCatching { listener.onShellClipboardChanged(text) }
             }

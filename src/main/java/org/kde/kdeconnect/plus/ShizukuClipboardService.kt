@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Shizuku UserService used to reach the clipboard with the shell identity.
@@ -30,7 +31,11 @@ class ShizukuClipboardService : IClipboardService.Stub() {
     override fun setPrimaryClipText(text: String): Boolean = backendOrNull()?.write(text) ?: false
 
     override fun registerWatcher(watcher: IClipboardWatcher) {
-        synchronized(watchers) { watchers.add(watcher) }
+        val count = synchronized(watchers) {
+            watchers.add(watcher)
+            watchers.size
+        }
+        Log.i(TAG, "clipboard watcher registered (count=$count)")
         startWatching()
     }
 
@@ -47,6 +52,7 @@ class ShizukuClipboardService : IClipboardService.Stub() {
         backend?.let { return it }
         val created = runCatching { ClipboardBackend.create() }
             .onFailure { Log.e(TAG, "cannot create clipboard backend", it) }
+            .onSuccess { Log.i(TAG, "clipboard backend ready: ${it.javaClass.simpleName}") }
             .getOrNull()
         backend = created
         return created
@@ -76,6 +82,7 @@ class ShizukuClipboardService : IClipboardService.Stub() {
             val current = backendOrNull()
             val changed = current?.pollChanged()
             if (changed != null) {
+                Log.d(TAG, "clipboard change detected (chars=${changed.length})")
                 val snapshot = synchronized(watchers) { watchers.toList() }
                 for (watcher in snapshot) {
                     val alive = runCatching { watcher.onClipboardChanged(changed) }.isSuccess
@@ -132,8 +139,10 @@ internal class DirectClipboardBackend : ClipboardBackend {
         context?.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 
     @Volatile private var lastSeen: String? = null
+    private val readFailureLogged = AtomicBoolean(false)
 
     init {
+        Log.i("KdeConnectPlus/ClipSvc", "direct backend context=${context != null}, clipboardManager=${cm != null}")
         lastSeen = read()
     }
 
@@ -141,7 +150,12 @@ internal class DirectClipboardBackend : ClipboardBackend {
         val clip = cm?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
         clip.getItemAt(0).coerceToText(context).toString()
-    }.getOrNull()
+    }.onFailure {
+        if (readFailureLogged.compareAndSet(false, true)) {
+            Log.w("KdeConnectPlus/ClipSvc", "direct clipboard read failed", it)
+        }
+    }.onSuccess { readFailureLogged.set(false) }
+        .getOrNull()
 
     override fun write(text: String): Boolean = runCatching {
         cm?.setPrimaryClip(ClipData.newPlainText(null, text))
@@ -153,6 +167,7 @@ internal class DirectClipboardBackend : ClipboardBackend {
         val current = read() ?: return null
         if (current == lastSeen) return null
         lastSeen = current
+        Log.d("KdeConnectPlus/ClipSvc", "direct backend detected clipboard change (chars=${current.length})")
         return current
     }
 

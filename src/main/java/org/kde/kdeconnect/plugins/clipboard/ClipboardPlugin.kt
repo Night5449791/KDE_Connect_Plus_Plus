@@ -12,6 +12,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import android.widget.Toast
 import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
@@ -88,6 +89,7 @@ class ClipboardPlugin : Plugin() {
                 lastAppliedFromRemote = null
                 return
             }
+            Log.d(TAG, "auto-sync clipboard change (type=$contentType, chars=${content.length})")
             propagateClipboard(content)
         }
     }
@@ -95,6 +97,7 @@ class ClipboardPlugin : Plugin() {
 
     @VisibleForTesting
     fun propagateClipboard(content: String) {
+        Log.d(TAG, "sending clipboard packet (chars=${content.length})")
         val np = NetworkPacket(PACKET_TYPE_CLIPBOARD)
         np["content"] = content
         device.sendPacket(np)
@@ -167,6 +170,8 @@ class ClipboardPlugin : Plugin() {
     }
 
     companion object {
+        private const val TAG = "KdeConnectPlus/Clipboard"
+
         /**
          * Packet containing just clipboard contents, sent when a device updates its clipboard.
          *
