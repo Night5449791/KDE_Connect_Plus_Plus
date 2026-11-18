@@ -61,9 +61,10 @@ object ShizukuClipboardBridge {
     }
 
     /**
-     * kdeconnect+ : ask the shell-side watchdog (uid 2000) to relaunch BackgroundService. The
-     * watchdog itself started when the UserService was created and keeps checking periodically;
-     * this just forces an immediate check, e.g. on boot or on Shizuku restart.
+     * kdeconnect+ : ask the shell-side watchdog (uid 2000) to relaunch BackgroundService. A
+     * detached `nohup` watchdog process was started when the UserService was first created and
+     * keeps checking periodically even if the app is force-stopped/frozen; this just forces an
+     * immediate check, e.g. on boot or on Shizuku restart.
      */
     fun requestWatchdogRelaunch() {
         val svc = service

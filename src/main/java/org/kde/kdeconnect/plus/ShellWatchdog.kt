@@ -3,95 +3,69 @@ package org.kde.kdeconnect.plus
 
 import android.util.Log
 import org.kde.kdeconnect_tp.BuildConfig
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 
 /**
- * Keeps the app's BackgroundService alive from a shell-identity (uid 2000) process.
+ * Keeps the app's BackgroundService alive using a standalone shell-identity watchdog process.
  *
- * The app process and its foreground service can be killed by the system or by vendor ROMs (vivo
- * OriginOS and friends). A normal app process cannot reliably restart its own foreground service
- * from the background on Android 12+; this watchdog runs inside the Shizuku UserService (already
- * uid 2000), which is exempt from the background-FGS restriction. It periodically checks whether
- * BackgroundService is running and, if not, clears the stopped state and starts the service via
- * `am start-foreground-service` with the shell identity.
+ * Why not a timer inside the Shizuku UserService: when the app process is force-stopped / frozen
+ * (vivo OriginOS and friends), Shizuku cancels the UserService's binder work, so an in-process
+ * timer stops exactly when it is needed most. A completely detached `nohup sh` process, started
+ * with shell (uid 2000) privileges, keeps running across force-stop/reboot-freeze and can relaunch
+ * the app's foreground service via `am start-foreground-service` (shell is exempt from the
+ * background-FGS restriction).
  */
-internal class ShellWatchdog {
+internal object ShellWatchdog {
 
-    private val executor: ScheduledExecutorService =
-        Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "plus-watchdog").apply { isDaemon = true }
-        }
+    private const val TAG = "KdeConnectPlus/Watchdog"
+    private const val MARKER = "kc-watchdog-loop"
+    private const val PID_FILE = "/data/local/tmp/kc_watchdog.pid"
 
     private val packageName: String = BuildConfig.APPLICATION_ID
     private val serviceComponent: String = "$packageName/org.kde.kdeconnect.BackgroundService"
-    @Volatile private var enabled = false
 
-    /** Start the periodic check. Called from the UserService process only. */
+    /** Start (or re-attach to) the detached watchdog. Called from the UserService process. */
     fun start() {
-        if (enabled) return
-        enabled = true
-        Log.i(TAG, "starting watchdog for $packageName (uid=${android.os.Process.myUid()})")
-        // Apply bypasses once on startup, then check service liveness periodically.
-        refreshBypasses()
-        executor.scheduleWithFixedDelay({ safeCheck() }, INITIAL_DELAY_S, CHECK_INTERVAL_S, TimeUnit.SECONDS)
+        ensureRunning()
     }
 
-    fun stop() {
-        enabled = false
-        executor.shutdownNow()
+    /** Launch the detached watchdog script if it is not already running. */
+    private fun ensureRunning() {
+        // The script records its own PID; we use `kill -0 <pid>` to check liveness precisely
+        // (pgrep -f would also match the very shell command that performs the check).
+        val alive = exec("test -f $PID_FILE && kill -0 \$(cat $PID_FILE) 2>/dev/null && echo yes")
+        if (alive == "yes") {
+            Log.i(TAG, "watchdog already running (pid file present)")
+            return
+        }
+        val script = buildString {
+            append("echo \$\$ > $PID_FILE; ")
+            append("PKG=$packageName; SVC=$serviceComponent; ")
+            append("while true; do ")
+            append("if ! dumpsys activity services \$PKG 2>/dev/null | grep -q 'org.kde.kdeconnect.BackgroundService'; then ")
+            append("cmd package unstop --user 0 \$PKG >/dev/null 2>&1; ")
+            append("cmd appops set \$PKG RUN_ANY_IN_BACKGROUND allow >/dev/null 2>&1; ")
+            append("am set-standby-bucket \$PKG active >/dev/null 2>&1; ")
+            append("dumpsys deviceidle whitelist +\$PKG >/dev/null 2>&1; ")
+            append("am start-foreground-service --user 0 -n \$SVC >/dev/null 2>&1; ")
+            append("fi; sleep 20; done # $MARKER")
+        }
+        // `nohup ... &` detaches the loop from this process and from the Shizuku UserService.
+        val result = exec("nohup sh -c '$script' >/dev/null 2>&1 &")
+        Log.i(TAG, "started detached watchdog: result=$result")
     }
 
-    /** Public entry point used by the AIDL requestRelaunch()/refreshBypasses(). */
+    /** Force an immediate check+relaunch from the shell (used by boot receiver via AIDL). */
     fun requestRelaunch() {
-        executor.execute { safeCheck() }
-    }
-
-    fun refreshBypasses() {
-        executor.execute { applyBypasses() }
-    }
-
-    private fun safeCheck() {
-        runCatching {
-            diag("check at ${System.currentTimeMillis()}")
-            val running = isServiceRunning()
-            diag("isServiceRunning=$running")
-            if (running) {
-                Log.i(TAG, "BackgroundService alive")
-            } else {
-                Log.i(TAG, "BackgroundService not running, relaunching")
-                relaunch()
-            }
-        }.onFailure { Log.w(TAG, "watchdog check failed", it); diag("check FAILED: $it") }
-    }
-
-    private fun diag(msg: String) {
-        runCatching { java.io.FileOutputStream("/data/local/tmp/kc_watchdog_diag.txt", true).use {
-            it.write((msg + "\n").toByteArray())
-        } }
-    }
-
-    /** Use `dumpsys activity services` rather than ActivityManager.getRunningServices (limited). */
-    private fun isServiceRunning(): Boolean {
-        val out = exec("dumpsys activity services $packageName") ?: return false
-        return out.contains("ServiceRecord{") &&
-            out.contains("org.kde.kdeconnect.BackgroundService")
-    }
-
-    private fun relaunch() {
-        // 1) Clear the stopped state (vivo force-stop / never-opened app). Android 13+.
-        diag("unstop: " + exec("cmd package unstop --user 0 $packageName"))
-        // 2) Apply the same bypasses again in case the ROM reset them.
-        applyBypasses()
-        // 3) Shell identity is exempt from background-FGS start restrictions, but the service
-        //    must be exported and must call startForeground() within a few seconds.
+        // Apply bypasses and start the service immediately, in addition to the periodic loop.
+        exec("cmd package unstop --user 0 $packageName")
+        refreshBypasses()
         val result = exec("am start-foreground-service --user 0 -n $serviceComponent")
-        diag("am result: $result")
-        Log.i(TAG, "relaunch result: $result")
+        Log.i(TAG, "immediate relaunch result=$result")
+        ensureRunning()
     }
 
-    private fun applyBypasses() {
+    /** Refresh the shell-side ROM bypasses. */
+    fun refreshBypasses() {
         exec("cmd appops set $packageName RUN_ANY_IN_BACKGROUND allow")
         exec("cmd appops set $packageName RUN_IN_BACKGROUND allow")
         exec("cmd appops set $packageName AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore")
@@ -103,15 +77,10 @@ internal class ShellWatchdog {
         val process = ProcessBuilder("/system/bin/sh", "-c", command)
             .redirectErrorStream(true)
             .start()
-        // Wait FIRST with a timeout. Reading the stream before waitFor() can block forever when
-        // `am start-foreground-service` starts a service that inherits stdout — that would hang
-        // the single-threaded executor and stop all future watchdog checks.
-        val finished = process.waitFor(COMMAND_TIMEOUT_S, TimeUnit.SECONDS)
-        if (!finished) {
-            Log.w(TAG, "exec timed out, destroying: $command")
-            process.destroyForcibly()
-        }
-        // Drain whatever is available without blocking again.
+        // Wait FIRST with a timeout: reading stdout before waitFor() can block forever when a
+        // started service inherits stdout, which would hang the shell thread.
+        val finished = process.waitFor(COMMAND_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS)
+        if (!finished) process.destroyForcibly()
         val available = process.inputStream.available()
         val output = if (available > 0) {
             ByteArray(available).let { buf ->
@@ -122,10 +91,5 @@ internal class ShellWatchdog {
         output.trim().ifEmpty { null }
     }.onFailure { Log.w(TAG, "exec failed: $command", it) }.getOrNull()
 
-    companion object {
-        private const val TAG = "KdeConnectPlus/Watchdog"
-        private const val INITIAL_DELAY_S = 10L
-        private const val CHECK_INTERVAL_S = 20L
-        private const val COMMAND_TIMEOUT_S = 10L
-    }
+    private const val COMMAND_TIMEOUT_S = 10L
 }

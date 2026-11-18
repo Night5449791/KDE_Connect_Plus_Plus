@@ -23,7 +23,6 @@ class ShizukuClipboardService : IClipboardService.Stub() {
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
     private var backend: ClipboardBackend? = null
-    private val watchdog = ShellWatchdog()
 
     override fun getPrimaryClipText(): String? = backendOrNull()?.read()
 
@@ -46,9 +45,9 @@ class ShizukuClipboardService : IClipboardService.Stub() {
         if (empty) stopWatching()
     }
 
-    override fun requestRelaunch() = watchdog.requestRelaunch()
+    override fun requestRelaunch() = ShellWatchdog.requestRelaunch()
 
-    override fun refreshBypasses() = watchdog.refreshBypasses()
+    override fun refreshBypasses() = ShellWatchdog.refreshBypasses()
 
     @Synchronized
     private fun backendOrNull(): ClipboardBackend? {
@@ -110,7 +109,7 @@ class ShizukuClipboardService : IClipboardService.Stub() {
         @JvmStatic
         fun create(): IBinder {
             Log.i(TAG, "creating clipboard user service, uid=${android.os.Process.myUid()}")
-            return ShizukuClipboardService().also { it.watchdog.start() }
+            return ShizukuClipboardService().also { ShellWatchdog.start() }
         }
     }
 }
