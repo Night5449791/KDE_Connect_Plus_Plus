@@ -26,7 +26,7 @@ class KdeConnectBroadcastReceiver : BroadcastReceiver() {
             }
 
             Intent.ACTION_BOOT_COMPLETED,
-            Intent.ACTION_TIME_SET,
+            Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_LOCALE_CHANGED -> {
                 Log.i("KdeConnect", "KdeConnectBroadcastReceiver: $action")
