@@ -77,7 +77,9 @@ internal object ShellClipboardAccess {
             if (clip.itemCount <= 0) return null
             val item = clip.getItemAt(0)
             // Plain text needs no Context; only content:// URIs need coerceToText.
-            item.text?.toString() ?: context?.let { item.coerceToText(it).toString() }
+            val text = item.text?.toString() ?: context?.let { item.coerceToText(it).toString() }
+            Log.d(TAG, "IClipboard read ok (chars=${text?.length}, count=${clip.itemCount})")
+            text
         } catch (t: Throwable) {
             Log.w(TAG, "IClipboard getPrimaryClip failed, using public ClipboardManager", t)
             readPublic(context)
