@@ -9,7 +9,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
-import org.kde.kdeconnect.BackgroundService
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -50,9 +49,9 @@ object ShizukuClipboardBridge {
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder received, (re)binding user service")
-        // kdeconnect+ auto relaunch: after Shizuku restarts, Android may have killed our
-        // BackgroundService (or never restarted it), so bring the app back up before binding.
-        relaunchBackgroundService()
+        // kdeconnect+ auto relaunch. The old code called BackgroundService.Start(context) here,
+        // but that runs in the app process and is blocked by the background-FGS restriction.
+        // Instead bind first, then ask the shell-side watchdog to relaunch with uid 2000.
         ensureBound()
     }
 
@@ -62,13 +61,21 @@ object ShizukuClipboardBridge {
     }
 
     /**
-     * kdeconnect+ : Shizuku already runs as shell/root, so it can start our service even from a
-     * cold process state. Falls back to a normal start when the shell path is unavailable.
+     * kdeconnect+ : ask the shell-side watchdog (uid 2000) to relaunch BackgroundService. The
+     * watchdog itself started when the UserService was created and keeps checking periodically;
+     * this just forces an immediate check, e.g. on boot or on Shizuku restart.
      */
-    private fun relaunchBackgroundService() {
-        val context = appContext ?: return
-        runCatching { BackgroundService.Start(context) }
-            .onFailure { Log.w(TAG, "relaunch of BackgroundService failed", it) }
+    fun requestWatchdogRelaunch() {
+        val svc = service
+        if (svc != null) {
+            runCatching { svc.requestRelaunch() }
+                .onFailure { Log.w(TAG, "watchdog requestRelaunch failed, falling back", it) }
+            runCatching { svc.refreshBypasses() }
+                .onFailure { Log.w(TAG, "watchdog refreshBypasses failed", it) }
+        } else {
+            // Not bound yet: ensureBound() will bind, and the watchdog starts on service create.
+            ensureBound()
+        }
     }
 
     private val permissionResultListener =
@@ -92,6 +99,10 @@ object ShizukuClipboardBridge {
             }
             service = svc
             Log.i(TAG, "clipboard user service connected")
+            // On (re)bind, force an immediate watchdog check so a killed BackgroundService is
+            // relaunched with shell identity as soon as the daemon is available.
+            runCatching { svc.requestRelaunch() }
+                .onFailure { Log.w(TAG, "initial watchdog relaunch failed", it) }
             runCatching { svc.registerWatcher(watcher) }
                 .onFailure { Log.e(TAG, "registerWatcher failed", it) }
             // Push the current clip once so a freshly started app syncs the latest value.

@@ -15,4 +15,13 @@ interface IClipboardService {
     void registerWatcher(IClipboardWatcher watcher);
 
     void unregisterWatcher(IClipboardWatcher watcher);
+
+    /**
+     * Watchdog: immediately check whether the app's BackgroundService is alive and relaunch it
+     * via shell (uid 2000) if not. Safe to call from the app process (e.g. boot receiver).
+     */
+    void requestRelaunch();
+
+    /** Watchdog: refresh the shell bypasses (clear stopped state, appops, standby whitelist). */
+    void refreshBypasses();
 }

@@ -103,8 +103,11 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
             android:enabled="true"
             android:exported="true" />
 
+        <!-- kdeconnect+ : exported so the shell-side watchdog (uid 2000) can start this service
+             via `am start-foreground-service` after the app process is killed. -->
         <service
             android:name="org.kde.kdeconnect.BackgroundService"
+            android:exported="true"
             android:foregroundServiceType="connectedDevice"
             android:icon="@drawable/icon"
             android:enabled="true" />
@@ -190,9 +193,10 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
-            </intent-filter>
-            <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.LOCALE_CHANGED" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />

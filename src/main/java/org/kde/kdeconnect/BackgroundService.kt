@@ -60,11 +60,11 @@ class BackgroundService : Service() {
         field = MutableLiveData<Boolean>()
 
     fun updateForegroundNotification() {
-        if (NotificationHelper.isPersistentNotificationEnabled(this)) {
-            // Update the foreground notification with the currently connected device list
-            val notificationManager = getSystemService<NotificationManager>()
-            notificationManager?.notify(FOREGROUND_NOTIFICATION_ID, createForegroundNotification())
-        }
+        // kdeconnect+ : always keep a foreground notification so the service is always a valid
+        // foreground service (required so the shell watchdog can restart it and Android won't kill
+        // it). When the persistent notification is disabled by the user we show a minimal one.
+        val notificationManager = getSystemService<NotificationManager>()
+        notificationManager?.notify(FOREGROUND_NOTIFICATION_ID, createForegroundNotification())
     }
 
     private fun registerLinkProviders() {
@@ -147,17 +147,28 @@ class BackgroundService : Service() {
     }
 
     fun changePersistentNotificationVisibility(visible: Boolean) {
-        if (visible) {
-            updateForegroundNotification()
-        }
-        else {
-            stopForeground(true) // Pass STOP_FOREGROUND_REMOVE instead of true when we only support API 24+
-            Start(this)
-        }
+        // kdeconnect+ : always keep a foreground notification so the service cannot be killed and
+        // can always be (re)started by the shell watchdog. When the user disables the persistent
+        // notification we keep a minimal one instead of calling stopForeground().
+        updateForegroundNotification()
     }
 
     private fun createForegroundNotification(): Notification {
         // Why is this needed: https://developer.android.com/guide/components/services#Foreground
+
+        // kdeconnect+ : when the user disables the persistent notification we still must keep a
+        // foreground service alive (for the shell watchdog and to avoid being killed). Show a
+        // minimal, low-priority notification in that case.
+        if (!NotificationHelper.isPersistentNotificationEnabled(this)) {
+            return NotificationCompat.Builder(this, NotificationHelper.Channels.PERSISTENT)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setShowWhen(false)
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+                .setContentTitle(getString(R.string.kde_connect))
+                .build()
+        }
 
         val connectedDevices = mutableListOf<String>()
         val connectedDeviceIds = mutableListOf<String>()
@@ -254,18 +265,19 @@ class BackgroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand")
-        if (NotificationHelper.isPersistentNotificationEnabled(this)) {
+        // kdeconnect+ : ALWAYS call startForeground(), regardless of the persistent-notification
+        // setting. When the shell watchdog starts this service via `am start-foreground-service`,
+        // Android requires startForeground() within a few seconds or it throws
+        // ForegroundServiceDidNotStartInTimeException and kills the service again.
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    startForeground(FOREGROUND_NOTIFICATION_ID, createForegroundNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-                } catch (e: IllegalStateException) { // To catch ForegroundServiceStartNotAllowedException
-                    Log.w("BackgroundService", "Couldn't startForeground", e)
-                    return START_STICKY
-                }
-            }
-            else {
+                startForeground(FOREGROUND_NOTIFICATION_ID, createForegroundNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
                 startForeground(FOREGROUND_NOTIFICATION_ID, createForegroundNotification())
             }
+        } catch (e: IllegalStateException) { // To catch ForegroundServiceStartNotAllowedException
+            Log.w("BackgroundService", "Couldn't startForeground", e)
+            return START_STICKY
         }
         if (intent != null && intent.getBooleanExtra("refresh", false)) {
             onNetworkChange(null)
