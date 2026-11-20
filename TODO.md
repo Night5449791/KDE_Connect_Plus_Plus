@@ -21,6 +21,7 @@
 | Shizuku 设置区块 | `src/main/java/org/kde/kdeconnect/plugins/clipboard/ClipboardSettingsFragment.kt` |
 | Manifest provider | `src/main/AndroidManifest.xml` |
 | 依赖 | `gradle/libs.versions.toml`、`build.gradle.kts`（Shizuku 13.1.5） |
+| Shizuku shell 文件代理（SFTP 访问方式） | `src/main/aidl/org/kde/kdeconnect/plus/IShellFileService.aidl`、`src/main/java/org/kde/kdeconnect/plus/ShizukuFile{Service,Bridge}.kt`、`src/main/java/org/kde/kdeconnect/plugins/sftp/shizuku/`、SFTP 设置页新增访问方式选择 |
 
 ### 设计要点
 
@@ -60,6 +61,8 @@
   UserService 的 binder 工作，检测恰好停止（死锁），故改用独立进程。依赖：UserService 需被
   首次创建（用户至少打开过一次 App 并授予 Shizuku 权限）；设备重启后 adb 版 Shizuku 需手动重新激活。
 - [ ] root/Sui 模式在该设备上无法使用 `cmd clipboard` shell 接口；需实现并验证替代后端
+- [ ] Shizuku 文件代理需真机验证：在 SFTP 插件设置里切到「Shizuku (shell proxy)」，授权后桌面浏览手机文件；测试 `stat`/读写/目录列举/权限位转换，确认不需要「所有文件访问权限」。CI 编译已通过（run 44761202652），但未在设备上运行
+
 
 ## 参考
 
