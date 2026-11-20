@@ -70,16 +70,16 @@ class MdnsDiscoveryTest {
     private fun advance(seconds: Long) = shadowOf(Looper.getMainLooper()).idleFor(seconds, TimeUnit.SECONDS)
 
     @Test
-    fun discoveryReleasesLockAfterThirtySecondsAndCanRestart() {
+    fun discoveryReleasesLockAfterTimeoutAndCanRestart() {
         discovery.startDiscovering()
-        advance(29)
+        advance(14)
         assertTrue(held)
         advance(1)
         assertFalse(held)
         verify(exactly = 1) { nsd.stopServiceDiscovery(listeners[0]) }
         discovery.startDiscovering()
         assertTrue(held)
-        advance(30)
+        advance(15)
         assertFalse(held)
         verify(exactly = 2) { lock.release() }
     }
@@ -87,9 +87,9 @@ class MdnsDiscoveryTest {
     @Test
     fun repeatedStartDoesNotExtendActiveWindow() {
         discovery.startDiscovering()
-        advance(20)
+        advance(7)
         discovery.startDiscovering()
-        advance(10)
+        advance(8)
         assertFalse(held)
         assertEquals(1, listeners.size)
     }
@@ -99,7 +99,7 @@ class MdnsDiscoveryTest {
         every { nsd.discoverServices(any<String>(), any(), any<NsdManager.DiscoveryListener>()) } throws SecurityException("denied")
         assertThrows(SecurityException::class.java) { discovery.startDiscovering() }
         assertFalse(held)
-        advance(30)
+        advance(15)
         verify(exactly = 0) { nsd.stopServiceDiscovery(any()) }
         every { nsd.discoverServices(any<String>(), any(), any<NsdManager.DiscoveryListener>()) } answers {
             listeners.add(arg(2))
@@ -111,13 +111,13 @@ class MdnsDiscoveryTest {
     @Test
     fun failedStartCancelsTimeoutWithoutStoppingNextSession() {
         discovery.startDiscovering()
-        advance(10)
+        advance(5)
         listeners[0].onStartDiscoveryFailed("_kdeconnect._udp", 3)
         assertFalse(held)
         discovery.startDiscovering()
-        advance(20)
+        advance(7)
         assertTrue(held)
-        advance(10)
+        advance(8)
         assertFalse(held)
     }
 
@@ -130,7 +130,7 @@ class MdnsDiscoveryTest {
         old.onDiscoveryStopped("_kdeconnect._udp")
         old.onStartDiscoveryFailed("_kdeconnect._udp", 3)
         assertTrue(held)
-        advance(30)
+        advance(15)
         assertFalse(held)
     }
 
@@ -139,7 +139,7 @@ class MdnsDiscoveryTest {
         discovery.startDiscovering()
         listeners[0].onDiscoveryStopped("_kdeconnect._udp")
         assertFalse(held)
-        advance(30)
+        advance(15)
         verify(exactly = 0) { nsd.stopServiceDiscovery(any()) }
         verify(exactly = 1) { lock.release() }
     }
@@ -149,7 +149,7 @@ class MdnsDiscoveryTest {
         discovery.startDiscovering()
         discovery.stopDiscovering()
         discovery.stopDiscovering()
-        advance(30)
+        advance(15)
         assertFalse(held)
         verify(exactly = 1) { lock.release() }
         verify(exactly = 1) { nsd.stopServiceDiscovery(any()) }
@@ -161,7 +161,7 @@ class MdnsDiscoveryTest {
         every { nsd.stopServiceDiscovery(any()) } throws SecurityException("denied")
         assertThrows(SecurityException::class.java) { discovery.stopDiscovering() }
         assertFalse(held)
-        advance(30)
+        advance(15)
         verify(exactly = 1) { lock.release() }
     }
 
@@ -169,7 +169,7 @@ class MdnsDiscoveryTest {
     fun untrustedNetworkDoesNotAcquireLock() {
         every { TrustedNetworkHelper.isTrustedNetwork(any()) } returns false
         discovery.startDiscovering()
-        advance(30)
+        advance(15)
         verify(exactly = 0) { lock.acquire() }
         assertTrue(listeners.isEmpty())
     }
