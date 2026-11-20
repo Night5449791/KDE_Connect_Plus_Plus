@@ -341,6 +341,26 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
     <string name="sftp_manage_storage_permission_explanation">To allow remote access to files on this device you need to allow KDE Connect to manage the storage.</string>
     <string name="sftp_missing_permission_error">Permissions missing: filesystem access</string>
     <string name="sftp_could_not_determine_ip">Could not determine local IP address</string>
+    <string name="sftp_preference_key_access_mode" translatable="false">key_sftp_access_mode</string>
+    <string name="sftp_preference_key_shizuku_auth" translatable="false">key_sftp_shizuku_auth</string>
+    <string name="sftp_access_mode_default" translatable="false">android</string>
+    <string name="sftp_preference_access_mode_title">File access mode</string>
+    <string name="sftp_shizuku_auth_title">Grant Shizuku file access</string>
+    <string name="sftp_shizuku_auth_summary">Tap to authorize Shizuku, then browse phone files without all-files permission</string>
+    <string name="sftp_access_mode_android">Android storage permission</string>
+    <string name="sftp_access_mode_shizuku">Shizuku (shell proxy)</string>
+    <string-array name="sftp_access_mode_entries">
+      <item>@string/sftp_access_mode_android</item>
+      <item>@string/sftp_access_mode_shizuku</item>
+    </string-array>
+    <string-array name="sftp_access_mode_values" translatable="false">
+      <item>android</item>
+      <item>shizuku</item>
+    </string-array>
+    <string name="sftp_shizuku_not_available">Shizuku is not available. Install and activate Shizuku first.</string>
+    <string name="sftp_shizuku_permission_needed">Shizuku permission is not granted</string>
+    <string name="sftp_shizuku_ready">Shizuku file proxy is ready</string>
+    <string name="sftp_shizuku_permission_explanation">Choose Shizuku mode and tap \"Grant Shizuku file access\" in plugin settings, or switch to Android storage permission mode.</string>
     <string name="no_players_connected">No players found</string>
     <string name="send_files">Send files</string>
     <string name="use_digitizer">Use as drawing tablet</string>

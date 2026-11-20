@@ -22,6 +22,7 @@ import kotlinx.serialization.SerializationException
 import org.kde.kdeconnect.NetworkPacket
 import org.kde.kdeconnect.helpers.JsonHelper.json
 import org.kde.kdeconnect.helpers.getLocalIpAddress
+import org.kde.kdeconnect.plus.ShizukuFileBridge
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory.LoadablePlugin
 import org.kde.kdeconnect.ui.AlertDialogFragment
@@ -40,17 +41,32 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
     override val description: String
         get() = context.resources.getString(R.string.pref_plugin_sftp_desc)
 
+    private fun getAccessMode(): String =
+        preferences.getString(context.getString(R.string.sftp_preference_key_access_mode), ACCESS_MODE_ANDROID)
+            ?: ACCESS_MODE_ANDROID
+
+    private fun isShizukuMode(): Boolean = getAccessMode() == ACCESS_MODE_SHIZUKU
+
     override fun checkRequiredPermissions(): Boolean {
-        return if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
-            Environment.isExternalStorageManager()
-        } else {
-            SftpSettingsFragment.getStorageInfoList(context, this).isNotEmpty()
+        return when {
+            isShizukuMode() -> ShizukuFileBridge.isAvailable()
+            SimpleSftpServer.SUPPORTS_NATIVEFS -> Environment.isExternalStorageManager()
+            else -> SftpSettingsFragment.getStorageInfoList(context, this).isNotEmpty()
         }
     }
 
     override val permissionExplanationDialog: AlertDialogFragment
-        get() = if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
-            StartActivityAlertDialogFragment.Builder()
+        get() = when {
+            isShizukuMode() -> DeviceSettingsAlertDialogFragment.Builder()
+                .setTitle(displayName)
+                .setMessage(R.string.sftp_shizuku_permission_explanation)
+                .setPositiveButton(R.string.ok)
+                .setNegativeButton(R.string.cancel)
+                .setDeviceId(device.deviceId)
+                .setPluginKey(pluginKey)
+                .create()
+
+            SimpleSftpServer.SUPPORTS_NATIVEFS -> StartActivityAlertDialogFragment.Builder()
                 .setTitle(displayName)
                 .setMessage(R.string.sftp_manage_storage_permission_explanation)
                 .setPositiveButton(R.string.open_settings)
@@ -59,8 +75,8 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
                 .setIntentUrl("package:${BuildConfig.APPLICATION_ID}")
                 .setReloadPluginsOnResult(true)
                 .create()
-        } else {
-            DeviceSettingsAlertDialogFragment.Builder()
+
+            else -> DeviceSettingsAlertDialogFragment.Builder()
                 .setTitle(displayName)
                 .setMessage(R.string.sftp_saf_permission_explanation)
                 .setPositiveButton(R.string.ok)
@@ -94,14 +110,22 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
             return true
         }
 
+        val shizukuMode = isShizukuMode()
+
         if (!server.isInitialized || server.isClosed) {
+            // Must be set before initialize() so the right FileSystemFactory is installed.
+            server.setShizukuMode(shizukuMode)
             server.initialize(context, device)
         }
 
         val paths = mutableListOf<String>()
         val pathNames = mutableListOf<String>()
 
-        if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
+        if (shizukuMode) {
+            // The Shizuku file proxy exposes the whole shell filesystem from "/".
+            paths.add("/")
+            pathNames.add("Root")
+        } else if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
             val storageManager = context.getSystemService<StorageManager>()!!
             for (sv in storageManager.storageVolumes) {
                 val directory = sv.directory ?: continue
@@ -225,7 +249,8 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
 
     override val outgoingPacketTypes: Array<String> = arrayOf(PACKET_TYPE_SFTP)
 
-    override val hasSettings: Boolean = !SimpleSftpServer.SUPPORTS_NATIVEFS
+    // Always show settings so the user can pick the file access mode (also on Android 11+).
+    override val hasSettings: Boolean = true
 
     override val settingsScope = SettingsScope.PER_DEVICE
 
@@ -234,7 +259,9 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
     }
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences, key: String?) {
-        if (key != context.getString(PREFERENCE_KEY_STORAGE_INFO_LIST)) return
+        if (key != context.getString(PREFERENCE_KEY_STORAGE_INFO_LIST) &&
+            key != context.getString(PREFERENCE_KEY_ACCESS_MODE)
+        ) return
         if (!server.isStarted) return
 
         server.stop()
@@ -278,6 +305,10 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
         private const val PACKET_TYPE_SFTP_REQUEST = "kdeconnect.sftp.request"
 
         val PREFERENCE_KEY_STORAGE_INFO_LIST: Int = R.string.sftp_preference_key_storage_info_list
+        val PREFERENCE_KEY_ACCESS_MODE: Int = R.string.sftp_preference_key_access_mode
+
+        const val ACCESS_MODE_ANDROID: String = "android"
+        const val ACCESS_MODE_SHIZUKU: String = "shizuku"
 
         private val server = SimpleSftpServer()
     }

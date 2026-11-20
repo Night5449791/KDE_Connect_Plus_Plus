@@ -28,6 +28,7 @@ import org.kde.kdeconnect.helpers.security.SslHelper
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory
 import org.kde.kdeconnect.plus.ShizukuClipboardBridge
+import org.kde.kdeconnect.plus.ShizukuFileBridge
 import org.kde.kdeconnect.ui.ThemeUtil
 import org.kde.kdeconnect_tp.BuildConfig
 import org.slf4j.impl.HandroidLoggerAdapter
@@ -70,6 +71,11 @@ class KdeConnect : Application() {
         // re-binds itself from the Shizuku binder-received listener.
         runCatching { ShizukuClipboardBridge.install(this) }
             .onFailure { Log.e("KdeConnect/Application", "Shizuku bridge install failed", it) }
+
+        // kdeconnect+ : bind the Shizuku shell file service used by SFTP's "Shizuku (shell proxy)"
+        // access mode. This lets the app browse files without holding MANAGE_EXTERNAL_STORAGE.
+        runCatching { ShizukuFileBridge.install(this) }
+            .onFailure { Log.e("KdeConnect/Application", "Shizuku file bridge install failed", it) }
 
         if (BuildConfig.DEBUG && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vmPolicyBuilder = VmPolicy.Builder(StrictMode.getVmPolicy())

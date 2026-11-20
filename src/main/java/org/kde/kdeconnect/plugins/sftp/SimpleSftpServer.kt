@@ -32,6 +32,7 @@ import org.kde.kdeconnect.helpers.security.RsaHelper
 import org.kde.kdeconnect.helpers.security.constantTimeCompare
 import org.kde.kdeconnect.plugins.sftp.saf.SafFileSystemFactory
 import org.kde.kdeconnect.plugins.sftp.saf.SafPath
+import org.kde.kdeconnect.plugins.sftp.shizuku.ShizukuFileSystemFactory
 import org.slf4j.impl.HandroidLoggerAdapter
 import java.io.IOException
 import java.nio.channels.Channel
@@ -77,6 +78,13 @@ internal class SimpleSftpServer {
     private lateinit var safFileSystemFactory: SafFileSystemFactory
     private lateinit var nativeFileSystemFactory: NativeStorageFileSystemFactory
 
+    private var shizukuMode = false
+
+    /** [enabled] defaults to true for compatibility; pass false when switching back to Android storage mode. */
+    fun setShizukuMode(enabled: Boolean = true) {
+        shizukuMode = enabled
+    }
+
     fun setSafStorageDirs(storageInfoList: List<SftpPlugin.StorageInfo>) {
         safFileSystemFactory.initRoots(storageInfoList)
     }
@@ -88,7 +96,9 @@ internal class SimpleSftpServer {
     fun initialize(context: Context, device: Device) {
         val sshd = ServerBuilder.builder().apply {
             fileSystemFactory(
-                if (SUPPORTS_NATIVEFS) {
+                if (shizukuMode) {
+                    ShizukuFileSystemFactory()
+                } else if (SUPPORTS_NATIVEFS) {
                     nativeFileSystemFactory = NativeStorageFileSystemFactory()
                     nativeFileSystemFactory
                 } else {

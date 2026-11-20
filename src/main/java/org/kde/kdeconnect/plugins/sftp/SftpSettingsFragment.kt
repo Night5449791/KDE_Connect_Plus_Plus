@@ -19,6 +19,7 @@ import androidx.appcompat.view.ActionMode
 import androidx.core.content.edit
 import androidx.core.graphics.drawable.DrawableCompat
 import androidx.core.util.set
+import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceScreen
@@ -27,6 +28,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import org.kde.kdeconnect.helpers.JsonHelper.json
+import org.kde.kdeconnect.plus.ShizukuClipboardBridge
+import org.kde.kdeconnect.plus.ShizukuFileBridge
+import org.kde.kdeconnect.plus.ShizukuPermissionActivity
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.ui.PluginSettingsActivity
 import org.kde.kdeconnect.ui.PluginSettingsFragment
@@ -41,6 +45,8 @@ class SftpSettingsFragment :
 
     private lateinit var storageInfoList: MutableList<SftpPlugin.StorageInfo>
     private var preferenceCategory: PreferenceCategory? = null
+    private var accessModePreference: ListPreference? = null
+    private var shizukuAuthPreference: Preference? = null
     private var actionMode: ActionMode? = null
     private var savedActionModeState: ActionModeState? = null
 
@@ -76,6 +82,25 @@ class SftpSettingsFragment :
         storageInfoList = getStorageInfoList(requireContext(), plugin)
 
         val preferenceScreen = preferenceScreen
+        val accessMode: ListPreference? = preferenceScreen.findPreference(getString(R.string.sftp_preference_key_access_mode))
+        accessModePreference = accessMode
+        val shizukuAuth: Preference? = preferenceScreen.findPreference(getString(R.string.sftp_preference_key_shizuku_auth))
+        shizukuAuthPreference = shizukuAuth
+
+        // Use a dedicated listener: this fragment's onPreferenceChange() unconditionally
+        // casts newValue to StorageInfo, which would crash for the access-mode list.
+        accessMode?.onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, newValue ->
+            val isShizuku = newValue as String == SftpPlugin.ACCESS_MODE_SHIZUKU
+            updateAccessModeVisibility(isShizuku)
+            device.launchBackgroundReloadPluginsFromSettings()
+            true
+        }
+
+        shizukuAuth?.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            startActivity(Intent(requireContext(), ShizukuPermissionActivity::class.java))
+            true
+        }
+
         val category: PreferenceCategory? = preferenceScreen.findPreference(getString(R.string.sftp_preference_key_preference_category))
         preferenceCategory = category
 
@@ -91,6 +116,41 @@ class SftpSettingsFragment :
             ta.recycle()
             DrawableCompat.setTint(icon, colorAccent)
         }
+
+        updateAccessModeVisibility(isShizukuMode())
+    }
+
+    private fun isShizukuMode(): Boolean {
+        val value = accessModePreference?.value
+            ?: plugin.preferences.getString(
+                getString(R.string.sftp_preference_key_access_mode),
+                SftpPlugin.ACCESS_MODE_ANDROID
+            )
+            ?: SftpPlugin.ACCESS_MODE_ANDROID
+        return value == SftpPlugin.ACCESS_MODE_SHIZUKU
+    }
+
+    private fun updateAccessModeVisibility(isShizuku: Boolean) {
+        shizukuAuthPreference?.isVisible = isShizuku
+        preferenceCategory?.isVisible = !isShizuku
+        preferenceScreen.findPreference<Preference>(getString(R.string.sftp_preference_key_add_storage))?.isVisible = !isShizuku
+        refreshShizukuStatus(isShizuku)
+    }
+
+    private fun refreshShizukuStatus(isShizuku: Boolean = isShizukuMode()) {
+        val preference = shizukuAuthPreference ?: return
+        if (!isShizuku) return
+        preference.summary = when {
+            !ShizukuFileBridge.isAvailable() -> getString(R.string.sftp_shizuku_not_available)
+            !ShizukuClipboardBridge.hasPermission() -> getString(R.string.sftp_shizuku_permission_needed)
+            else -> getString(R.string.sftp_shizuku_ready)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Shizuku permission is granted in another activity; re-check when we come back.
+        refreshShizukuStatus()
     }
 
     private fun addStoragePreferences(preferenceCategory: PreferenceCategory) {
