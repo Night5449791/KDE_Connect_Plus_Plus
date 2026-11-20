@@ -48,9 +48,9 @@ class ClipboardPlugin : Plugin() {
         val content = np.getString("content")
         when (np.type) {
             (PACKET_TYPE_CLIPBOARD) -> {
-                // kdeconnect+ : remember the remote value so the local listener does not echo it
-                // straight back when the shell reports the write as a clipboard change.
-                lastAppliedFromRemote = content
+                // kdeconnect+ : remember the remote value's hash so the local observer does not
+                // echo it straight back when the shell reports the write as a clipboard change.
+                rememberRemoteClip(content)
                 ClipboardListener.instance(context).setText(content)
                 return true
             }
@@ -61,7 +61,7 @@ class ClipboardPlugin : Plugin() {
                     return false
                 }
                 if ("content" in np) { // change clipboard if content is in NetworkPacket
-                    lastAppliedFromRemote = content
+                    rememberRemoteClip(content)
                     ClipboardListener.instance(context).setText(content)
                 }
                 return true
@@ -70,9 +70,53 @@ class ClipboardPlugin : Plugin() {
         }
     }
 
-    /** kdeconnect+ : last value written locally because a remote device sent it. */
-    @Volatile
-    private var lastAppliedFromRemote: String? = null
+    /**
+     * kdeconnect+ : values written locally because a remote device sent them. Only the text hash
+     * is kept (never the text itself), capped at [MAX_ECHO_ENTRIES] and expiring after
+     * [ECHO_TTL_MS], so a stale marker can never suppress a later legitimate copy forever.
+     * Plugin instances are per device, which also excludes the sender in a multi-device setup:
+     * only this device's instance carries its own source id in the queue.
+     */
+    private data class EchoEntry(val hash: Int, val createdAtMs: Long, val sourceDeviceId: String?)
+
+    private val echoLock = Any()
+    private val echoQueue = ArrayList<EchoEntry>()
+
+    private fun myDeviceId(): String? = runCatching { device.deviceId }.getOrNull()
+
+    /** Records a remote write before applying it locally. */
+    private fun rememberRemoteClip(content: String) {
+        val hash = content.hashCode()
+        val now = System.currentTimeMillis()
+        synchronized(echoLock) {
+            echoQueue.removeAll { now - it.createdAtMs > ECHO_TTL_MS }
+            echoQueue.removeAll { it.hash == hash }
+            echoQueue.add(EchoEntry(hash, now, myDeviceId()))
+            while (echoQueue.size > MAX_ECHO_ENTRIES) {
+                echoQueue.removeAt(0)
+            }
+        }
+    }
+
+    /**
+     * True when this content is the echo of a remote write: consumes the marker so a second,
+     * genuine copy of the same text is reported normally.
+     */
+    private fun isEchoAndConsume(content: String): Boolean {
+        val hash = content.hashCode()
+        val now = System.currentTimeMillis()
+        return synchronized(echoLock) {
+            echoQueue.removeAll { now - it.createdAtMs > ECHO_TTL_MS }
+            val index = echoQueue.indexOfFirst { it.hash == hash }
+            if (index < 0) {
+                false
+            } else {
+                val entry = echoQueue.removeAt(index)
+                // Defensive: never exclude a device other than the original sender.
+                entry.sourceDeviceId == null || entry.sourceDeviceId == myDeviceId()
+            }
+        }
+    }
 
     private val observer: ClipboardObserver = object : ClipboardObserver {
         override fun clipboardChanged(content: String, contentType: ClipboardListener.ClipboardContentType) {
@@ -84,9 +128,9 @@ class ClipboardPlugin : Plugin() {
             ) {
                 return
             }
-            // kdeconnect+ : do not bounce a remote write back to the sender.
-            if (content == lastAppliedFromRemote) {
-                lastAppliedFromRemote = null
+            // kdeconnect+ : do not bounce a remote write back to the sender. A hash match
+            // consumes the marker; other device instances have no marker and still relay.
+            if (isEchoAndConsume(content)) {
                 return
             }
             Log.d(TAG, "auto-sync clipboard change (type=$contentType, chars=${content.length})")
@@ -171,6 +215,10 @@ class ClipboardPlugin : Plugin() {
 
     companion object {
         private const val TAG = "KdeConnectPlus/Clipboard"
+
+        /** Echo markers are short-lived and bounded; only a 32-bit hash is retained. */
+        private const val MAX_ECHO_ENTRIES = 8
+        private const val ECHO_TTL_MS = 30_000L
 
         /**
          * Packet containing just clipboard contents, sent when a device updates its clipboard.

@@ -37,6 +37,9 @@ class MdnsDiscovery {
     private var registrationListener: RegistrationListener? = null
     private var discoveryListener: DiscoveryListener? = null
     private val multicastLock: MulticastLock
+    // 省电：显式跟踪 multicast lock 持有状态，避免重复 acquire/release（各 ROM 的 isHeld 行为不完全可靠）
+    @Volatile
+    private var isMulticastLockHeld = false
     private val mNsdResolveQueue: NsdResolveQueue
 
     constructor(context: Context, lanLinkProvider: LanLinkProvider) {
@@ -68,7 +71,10 @@ class MdnsDiscovery {
         }
         if (discoveryListener == null) {
             val listener = createDiscoveryListener()
-            multicastLock.acquire()
+            if (!isMulticastLockHeld) {
+                multicastLock.acquire()
+                isMulticastLockHeld = true
+            }
             discoveryListener = listener
             // Schedule before requesting discovery so even an immediate failure callback
             // can cancel the timeout belonging to this discovery session.
@@ -103,8 +109,22 @@ class MdnsDiscovery {
         if (listener == null || discoveryListener !== listener) return
         handler.removeCallbacks(stopDiscoveryRunnable)
         discoveryListener = null
-        if (multicastLock.isHeld) {
+        if (isMulticastLockHeld) {
             multicastLock.release()
+            isMulticastLockHeld = false
+        }
+    }
+
+    /**
+     * 省电：已解析到至少一个可信设备并完成 UDP 唤醒后，立刻结束发现会话并释放 MulticastLock。
+     * 不再让 Wi-Fi 保持 multicast 唤醒满一个窗口；15s 的最大窗口只作为无发现结果时的兜底。
+     * [owner] 是创建 resolve listener 时所属的那次发现会话，防止迟到的回调误停新一轮发现。
+     */
+    @Synchronized
+    private fun onTargetResolved(owner: DiscoveryListener?) {
+        if (owner != null && discoveryListener === owner) {
+            Log.i(TAG, "Trusted mDNS device resolved, stopping discovery early to release MulticastLock")
+            stopDiscovering() // clearDiscovery() 会释放 MulticastLock
         }
     }
 
@@ -250,6 +270,9 @@ class MdnsDiscovery {
      * Returns a new listener instance since NsdManager wants a different listener each time you call resolveService
      */
     fun createResolveListener() = object : NsdManager.ResolveListener {
+        // 记录创建时所属的发现会话；迟到的 resolve 回调不能误停后来新开的一轮发现
+        private val owner: DiscoveryListener? = this@MdnsDiscovery.discoveryListener
+
         override fun onResolveFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
             Log.w(TAG, "MDNS error $errorCode resolving service: $serviceInfo")
         }
@@ -273,6 +296,10 @@ class MdnsDiscovery {
             //       here, since we already have all the info we need to start a connection
             //       and the remaining identity info will be exchanged later.
             lanLinkProvider.sendUdpIdentityPacket(listOf(remoteAddress), network)
+
+            // 省电：已解析到可信设备并完成 UDP 唤醒，立即结束发现、释放 MulticastLock，
+            // 不再让 Wi-Fi 持续监听 multicast。15s 最大窗口仅作无结果时的兜底。
+            onTargetResolved(owner)
         }
 
         /**
@@ -296,6 +323,7 @@ class MdnsDiscovery {
 
         private const val SERVICE_TYPE: String = "_kdeconnect._udp"
 
-        private const val DISCOVERY_TIMEOUT_MILLIS: Long = 30000L
+        /** 发现窗口上限，从 30s 缩短到 15s；正常情况在解析到设备时就会提前释放（省电） */
+        private const val DISCOVERY_TIMEOUT_MILLIS: Long = 15000L
     }
 }

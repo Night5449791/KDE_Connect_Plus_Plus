@@ -100,6 +100,14 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
     override fun loadPluginWhenRequiredPermissionsMissing() = true
 
     override fun onPacketReceived(np: NetworkPacket): Boolean {
+        // 桌面端明确停止浏览时主动停掉 SFTP 服务：释放 1739 端口和 NIO 线程池，让系统空闲时
+        // 可以进入 Doze（省电）。SimpleSftpServer 内部的 3 分钟空闲倒计时作为桌面端崩溃/未发送
+        // 停止包时的兜底。用 has() 区分「明确为 false」与「无此 key 的其它包」，避免误伤。
+        if (np.has("startBrowsing") && !np.getBoolean("startBrowsing")) {
+            server.stop()
+            return true
+        }
+
         if (!np.getBoolean("startBrowsing")) return false
 
         if (!checkRequiredPermissions()) {

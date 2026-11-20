@@ -6,6 +6,7 @@
 package org.kde.kdeconnect.plugins.sftp.shizuku
 
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import org.json.JSONObject
 import org.kde.kdeconnect.plus.ShizukuFileBridge
 import java.io.FileInputStream
@@ -40,6 +41,7 @@ import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.UserPrincipal
 import java.nio.file.spi.FileSystemProvider
+import java.util.LinkedHashMap
 
 /**
  * NIO [FileSystemProvider] that forwards every operation to [ShizukuFileBridge], which in turn
@@ -52,6 +54,32 @@ import java.nio.file.spi.FileSystemProvider
 class ShizukuFileSystemProvider : FileSystemProvider() {
 
     private val bridge = ShizukuFileBridge
+
+    /**
+     * Short-lived metadata cache. A batch directory listing seeds it with every child's stat, so a
+     * client's LSTAT of those children is served locally instead of costing one binder call each.
+     * Access-ordered LRU, evicted above 256 entries; all access goes through the @Synchronized
+     * helpers below. Only followLinks=true results are cached.
+     */
+    private class StatCacheEntry(val info: StatInfo, val timestamp: Long)
+
+    private val statCache = object : LinkedHashMap<String, StatCacheEntry>(64, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, StatCacheEntry>?
+        ): Boolean = size > 256
+    }
+
+    @Synchronized
+    private fun cachedStat(key: String): StatInfo? {
+        val cached = statCache[key] ?: return null
+        if (SystemClock.elapsedRealtime() - cached.timestamp >= STAT_CACHE_TTL_MS) return null
+        return cached.info
+    }
+
+    @Synchronized
+    private fun rememberStat(key: String, info: StatInfo) {
+        statCache[key] = StatCacheEntry(info, SystemClock.elapsedRealtime())
+    }
 
     override fun getScheme(): String = "shizuku"
 
@@ -75,15 +103,13 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
         return path.pathString
     }
 
-    /** Run a bridge call, normalising any failure into an [IOException]. */
-    private fun <T> call(block: () -> T): T = runCatching(block).getOrElse {
-        if (it is IOException) throw it else throw IOException(it)
-    }
-
     private fun statInfo(path: ShizukuPath, followLinks: Boolean = true): StatInfo {
-        val json = call { bridge.stat(path.pathString, followLinks) }
-            ?: throw NoSuchFileException(path.pathString)
-        return StatInfo(json)
+        val key = path.pathString
+        if (followLinks) cachedStat(key)?.let { return it }
+        val json = bridge.stat(key, followLinks) ?: throw NoSuchFileException(key)
+        val info = StatInfo(json)
+        if (followLinks) rememberStat(key, info)
+        return info
     }
 
     private data class OpenedFile(val pfd: ParcelFileDescriptor, val mode: String)
@@ -99,13 +125,6 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
         val create = StandardOpenOption.CREATE in options || StandardOpenOption.CREATE_NEW in options
         val createNew = StandardOpenOption.CREATE_NEW in options
 
-        val exists = call { bridge.exists(absolute) }
-        if (createNew && exists) throw FileAlreadyExistsException(absolute)
-        if (create && !exists) {
-            // Ensure the file exists before opening it (needed for "rw" and for CREATE).
-            call { bridge.openFile(absolute, "w") }?.close()
-        }
-
         val mode = when {
             readWrite -> "rw"
             write && StandardOpenOption.APPEND in options -> "a"
@@ -114,7 +133,27 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
             read -> "r"
             else -> "r"
         }
-        val pfd = call { bridge.openFile(absolute, mode) }
+
+        // Open first: the common "already exists" path now costs a single binder call, and no
+        // separate exists() probe is issued. A null result is treated as "not openable/absent".
+        // CREATE_NEW probes with "r" so an existing file is never truncated before we reject it.
+        val existing = bridge.openFile(absolute, if (createNew) "r" else mode)
+        if (existing != null) {
+            if (createNew) {
+                existing.close()
+                throw FileAlreadyExistsException(absolute)
+            }
+            return OpenedFile(existing, mode)
+        }
+        if (!create) throw FileNotFoundException("Failed to open $absolute (mode=$mode)")
+
+        // CREATE: "w" both materialises the file and yields a descriptor (2 calls total); for
+        // other modes reopen once in the requested mode.
+        val created = bridge.openFile(absolute, "w")
+            ?: throw FileNotFoundException("Failed to create $absolute")
+        if (mode == "w") return OpenedFile(created, mode)
+        created.close()
+        val pfd = bridge.openFile(absolute, mode)
             ?: throw FileNotFoundException("Failed to open $absolute (mode=$mode)")
         return OpenedFile(pfd, mode)
     }
@@ -146,6 +185,8 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
         return object : SeekableByteChannel by channel {
             @Volatile
             private var closed = false
+            @Volatile
+            private var pfdClosed = false
 
             override fun close() {
                 if (closed) return
@@ -153,7 +194,11 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
                 try {
                     channel.close()
                 } finally {
-                    opened.pfd.close()
+                    // channel and pfd may reference the same fd; each is closed at most once.
+                    if (!pfdClosed) {
+                        pfdClosed = true
+                        opened.pfd.close()
+                    }
                 }
             }
         }
@@ -178,14 +223,21 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
         filter: DirectoryStream.Filter<in Path>
     ): DirectoryStream<Path> {
         val absolute = abs(dir)
-        val names = call { bridge.listDirectory(absolute) }
+        val entries = bridge.listDirectoryEntries(absolute, true)
             ?: throw NoSuchFileException(absolute)
         val fileSystem = dir.fileSystem
+        val paths = mutableListOf<Path>()
+        for (entry in entries) {
+            val obj = JSONObject(entry)
+            val name = obj.optString("name")
+            if (name.isEmpty()) continue
+            val child = fileSystem.getPath(absolute, name)
+            // Seed the cache so the client's LSTAT of each child needs no further binder call.
+            obj.optJSONObject("stat")?.let { rememberStat(abs(child), StatInfo(it.toString())) }
+            if (filter.accept(child)) paths += child
+        }
         return object : DirectoryStream<Path> {
-            override fun iterator(): MutableIterator<Path> = names.mapNotNull { name ->
-                val child = fileSystem.getPath(absolute, name)
-                if (filter.accept(child)) child else null
-            }.toMutableList().iterator()
+            override fun iterator(): MutableIterator<Path> = paths.iterator()
 
             override fun close() {
                 // no-op
@@ -196,7 +248,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
     override fun createDirectory(dir: Path, vararg attrs: FileAttribute<*>) {
         val absolute = abs(dir)
         if (absolute == "/") throw IOException("Cannot create root directory")
-        if (!call { bridge.createDirectory(absolute) }) {
+        if (!bridge.createDirectory(absolute)) {
             throw IOException("Failed to create directory $absolute")
         }
     }
@@ -204,15 +256,15 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
     override fun delete(path: Path) {
         val absolute = abs(path)
         if (absolute == "/") throw IOException("Cannot delete root directory")
-        if (!call { bridge.delete(absolute) }) throw NoSuchFileException(absolute)
+        if (!bridge.delete(absolute)) throw NoSuchFileException(absolute)
     }
 
     override fun copy(source: Path, target: Path, vararg options: CopyOption) {
         val src = abs(source)
         val dst = abs(target)
         val overwrite = StandardCopyOption.REPLACE_EXISTING in options
-        if (!overwrite && call { bridge.exists(dst) }) throw FileAlreadyExistsException(dst)
-        if (!call { bridge.copyFile(src, dst, overwrite) }) {
+        if (!overwrite && bridge.exists(dst)) throw FileAlreadyExistsException(dst)
+        if (!bridge.copyFile(src, dst, overwrite)) {
             throw IOException("Failed to copy $src to $dst")
         }
     }
@@ -221,22 +273,25 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
         val src = abs(source)
         val dst = abs(target)
         val overwrite = StandardCopyOption.REPLACE_EXISTING in options
-        if (call { bridge.rename(src, dst) }) return
+        if (bridge.rename(src, dst)) return
 
         // Cross-device / rename failure fallback: copy then delete.
-        if (!overwrite && call { bridge.exists(dst) }) throw FileAlreadyExistsException(dst)
-        if (!call { bridge.copyFile(src, dst, overwrite) }) {
+        if (!overwrite && bridge.exists(dst)) throw FileAlreadyExistsException(dst)
+        if (!bridge.copyFile(src, dst, overwrite)) {
             throw IOException("Failed to move $src to $dst")
         }
-        if (!call { bridge.delete(src) }) {
+        if (!bridge.delete(src)) {
             throw IOException("Failed to delete source $src after move")
         }
     }
 
     override fun isSameFile(p1: Path, p2: Path): Boolean {
         if (p1 === p2) return true
-        val c1 = call { bridge.canonicalPath(abs(p1)) } ?: abs(p1)
-        val c2 = call { bridge.canonicalPath(abs(p2)) } ?: abs(p2)
+        val a1 = abs(p1)
+        val a2 = abs(p2)
+        val c1 = bridge.canonicalPath(a1) ?: a1
+        // Same path string: reuse c1 instead of asking the bridge to resolve it twice.
+        val c2 = if (a2 == a1) c1 else (bridge.canonicalPath(a2) ?: a2)
         return c1 == c2
     }
 
@@ -292,7 +347,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
                     createTime: FileTime?
                 ) {
                     if (lastModifiedTime != null) {
-                        call { bridge.setLastModified(shizukuPath.pathString, lastModifiedTime.toMillis()) }
+                        bridge.setLastModified(shizukuPath.pathString, lastModifiedTime.toMillis())
                     }
                 }
             } as V
@@ -312,7 +367,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
                     createTime: FileTime?
                 ) {
                     if (lastModifiedTime != null) {
-                        call { bridge.setLastModified(shizukuPath.pathString, lastModifiedTime.toMillis()) }
+                        bridge.setLastModified(shizukuPath.pathString, lastModifiedTime.toMillis())
                     }
                 }
 
@@ -325,7 +380,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
 
                 override fun setPermissions(perms: MutableSet<PosixFilePermission>?) {
                     if (perms != null) {
-                        call { bridge.chmod(shizukuPath.pathString, permissionsToMode(perms)) }
+                        bridge.chmod(shizukuPath.pathString, permissionsToMode(perms))
                     }
                 }
 
@@ -413,13 +468,13 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
                 if (value is Set<*>) {
                     @Suppress("UNCHECKED_CAST")
                     val perms = value as Set<PosixFilePermission>
-                    call { bridge.chmod(absolute, permissionsToMode(perms)) }
+                    bridge.chmod(absolute, permissionsToMode(perms))
                 }
             }
 
             "basic:lastModifiedTime", "lastModifiedTime" -> {
                 if (value is FileTime) {
-                    call { bridge.setLastModified(absolute, value.toMillis()) }
+                    bridge.setLastModified(absolute, value.toMillis())
                 }
             }
 
@@ -460,6 +515,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
 
     companion object {
         private const val TAG = "ShizukuFileSystemProvider"
+        private const val STAT_CACHE_TTL_MS = 2000L
 
         // Owner / group / other read, write and execute bits of a POSIX mode word.
         private const val READ_BITS = 0x124 // 0444

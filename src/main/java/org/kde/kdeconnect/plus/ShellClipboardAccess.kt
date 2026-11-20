@@ -4,9 +4,14 @@ package org.kde.kdeconnect.plus
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Binder
 import android.os.IBinder
+import android.os.IInterface
+import android.os.Parcel
 import android.util.Log
+import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 
 /**
  * Clipboard access through the raw [IClipboard] binder, passing "com.android.shell" explicitly
@@ -32,10 +37,24 @@ internal object ShellClipboardAccess {
     private const val USER_ID = 0
     private const val DEVICE_ID_DEFAULT = 0
 
+    /** AOSP `IOnPrimaryClipChangedListener.dispatchPrimaryClipChanged()` is transaction 1. */
+    private const val TRANSACTION_DISPATCH_PRIMARY_CLIP_CHANGED = 1
+
     @Volatile private var service: Any? = null
     @Volatile private var getMethod: Method? = null
     @Volatile private var setMethod: Method? = null
+    @Volatile private var addListenerMethod: Method? = null
+    @Volatile private var removeListenerMethod: Method? = null
     private var attempted = false
+
+    /** Cached arg templates: one signature -> one immutable array, slots patched per call. */
+    private class ArgTemplate(
+        val args: Array<Any?>,
+        val clipSlots: IntArray,
+        val listenerSlots: IntArray,
+    )
+
+    private val argTemplates = HashMap<Method, ArgTemplate>()
 
     /** Resolve the clipboard binder once; safe to call from any thread. */
     @Synchronized
@@ -52,12 +71,23 @@ internal object ShellClipboardAccess {
                 .invoke(null, binder)
                 ?: throw IllegalStateException("asInterface returned null")
             service = svc
-            getMethod = svc.javaClass.methods.firstOrNull { it.name == "getPrimaryClip" }
-            setMethod = svc.javaClass.methods.firstOrNull { it.name == "setPrimaryClip" }
+            val methods = svc.javaClass.methods
+            getMethod = methods.firstOrNull { it.name == "getPrimaryClip" }
+            setMethod = methods.firstOrNull { it.name == "setPrimaryClip" }
+            fun listenerMethod(name: String): Method? =
+                methods.firstOrNull {
+                    it.name == name && it.parameterTypes.any { t ->
+                        IInterface::class.java.isAssignableFrom(t)
+                    }
+                } ?: methods.firstOrNull { it.name == name }
+            addListenerMethod = listenerMethod("addPrimaryClipChangedListener")
+            removeListenerMethod = listenerMethod("removePrimaryClipChangedListener")
             Log.i(
                 TAG,
                 "IClipboard ready get(${getMethod?.parameterTypes?.joinToString { it.name }}) " +
-                    "set(${setMethod?.parameterTypes?.joinToString { it.name }})",
+                    "set(${setMethod?.parameterTypes?.joinToString { it.name }}) " +
+                    "add(${addListenerMethod?.parameterTypes?.joinToString { it.name }}) " +
+                    "remove(${removeListenerMethod?.parameterTypes?.joinToString { it.name }})",
             )
             true
         } catch (t: Throwable) {
@@ -67,12 +97,71 @@ internal object ShellClipboardAccess {
         }
     }
 
+    /**
+     * Creates an `android.content.IOnPrimaryClipChangedListener` proxy backed by a real Binder.
+     * AIDL marshals the listener with `listener.asBinder()`, so a plain dynamic proxy is not
+     * enough: the proxy supplies the interface type and the Binder receives the one-way
+     * transaction from system_server. All reflection is contained in runCatching; null means
+     * "event mode unavailable" and the caller must fall back to polling.
+     */
+    fun createPrimaryClipChangedListener(onChanged: () -> Unit): IInterface? = runCatching {
+        val listenerClass = Class.forName("android.content.IOnPrimaryClipChangedListener")
+        require(listenerClass.isInterface) { "IOnPrimaryClipChangedListener is not an interface" }
+        val binder = object : Binder() {
+            override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+                // AOSP assigns code 1 to dispatchPrimaryClipChanged. Vendors may prepend methods,
+                // so accept the whole low AIDL range; standard binder pseudo-codes are far above.
+                if (code in TRANSACTION_DISPATCH_PRIMARY_CLIP_CHANGED..100) {
+                    onChanged()
+                    return true
+                }
+                return super.onTransact(code, data, reply, flags)
+            }
+        }
+        val handler = InvocationHandler { proxy, method, args ->
+            when (method.name) {
+                "asBinder" -> binder
+                // AOSP names it dispatchPrimaryClipChanged; accept the older/alias name too.
+                "dispatchPrimaryClipChanged", "onPrimaryClipChanged" -> {
+                    onChanged()
+                    null
+                }
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === args?.firstOrNull()
+                "toString" -> "KdeConnectPlus.PrimaryClipChangedListener"
+                else -> null
+            }
+        }
+        Proxy.newProxyInstance(listenerClass.classLoader, arrayOf(listenerClass), handler) as IInterface
+    }.onFailure { Log.w(TAG, "cannot create primary-clip listener proxy", it) }.getOrNull()
+
+    /** Registers the listener on `IClipboard`; false means the caller should keep polling. */
+    fun registerPrimaryClipChangedListener(listener: IInterface): Boolean {
+        if (!ensure()) return false
+        val method = addListenerMethod ?: return false
+        return runCatching {
+            method.invoke(service, *buildArgs(method, null, listener))
+            Log.i(TAG, "primary-clip listener registered via ${method.name}")
+            true
+        }.onFailure { Log.w(TAG, "addPrimaryClipChangedListener failed", it) }
+            .getOrDefault(false)
+    }
+
+    fun unregisterPrimaryClipChangedListener(listener: IInterface) {
+        if (!ensure()) return
+        val method = removeListenerMethod ?: return
+        runCatching {
+            method.invoke(service, *buildArgs(method, null, listener))
+            Log.i(TAG, "primary-clip listener unregistered")
+        }.onFailure { Log.w(TAG, "removePrimaryClipChangedListener failed", it) }
+    }
+
     /** Returns the current primary clip as text, or null when empty / not readable. */
     fun read(context: Context?): String? {
         if (!ensure()) return readPublic(context)
         val method = getMethod ?: return readPublic(context)
         return try {
-            val clip = method.invoke(service, *buildArgs(method, null)) as? ClipData
+            val clip = method.invoke(service, *buildArgs(method, null, null)) as? ClipData
             // A null clip is a legitimate result (empty clipboard, locked device, no focus).
             // Do NOT fall back to the public ClipboardManager here: it would use the app's op
             // package name and throw "calling package does not match caller's uid". Fallback is
@@ -93,7 +182,7 @@ internal object ShellClipboardAccess {
         if (!ensure()) return writePublic(context, text)
         val method = setMethod ?: return writePublic(context, text)
         return try {
-            method.invoke(service, *buildArgs(method, ClipData.newPlainText(null, text)))
+            method.invoke(service, *buildArgs(method, ClipData.newPlainText(null, text), null))
             true
         } catch (t: Throwable) {
             Log.w(TAG, "IClipboard setPrimaryClip failed, using public ClipboardManager", t)
@@ -102,27 +191,51 @@ internal object ShellClipboardAccess {
     }
 
     /**
-     * Map every parameter to a concrete value by its type. Vendors (notably vivo) append extra
-     * parameters to the AOSP signature, so we must never leave a primitive as null: reflection
-     * throws IllegalArgumentException if a primitive receives null even though the call would
-     * otherwise work. Rules:
+     * Build one template per signature (first call inspects the parameter types), then reuse it:
+     * the read path allocates nothing at all, write/listener calls only copy the small template
+     * and replace the ClipData / listener slots. Rules mirror [planArgs]:
+     *   - first IInterface-typed parameter -> the listener binder; other interfaces -> null
      *   - ClipData -> the clip to write (read has none)
      *   - first String -> calling package "com.android.shell"; later Strings -> null attribution tags
      *   - first int -> user id; later ints -> device id / defaults (all 0)
      *   - boolean and any other primitive -> false / 0 boxed value
      *   - any other reference type -> null
      */
-    private fun buildArgs(method: Method, clip: ClipData?): Array<Any?> {
+    @Synchronized
+    private fun templateFor(method: Method): ArgTemplate = argTemplates.getOrPut(method) {
+        val types = method.parameterTypes
+        val args = arrayOfNulls<Any?>(types.size)
+        val clipSlots = ArrayList<Int>()
+        val listenerSlots = ArrayList<Int>()
         var strings = 0
         var ints = 0
-        return method.parameterTypes.map { type ->
-            when (type) {
-                ClipData::class.java -> clip
-                String::class.java -> if (strings++ == 0) SHELL_PACKAGE else null
-                Integer.TYPE -> if (ints++ == 0) USER_ID else DEVICE_ID_DEFAULT
-                else -> primitiveDefault(type)
+        types.forEachIndexed { index, type ->
+            when {
+                type == ClipData::class.java -> {
+                    clipSlots += index
+                    args[index] = null
+                }
+                type.isInterface && IInterface::class.java.isAssignableFrom(type) -> {
+                    listenerSlots += index
+                    args[index] = null
+                }
+                type == String::class.java -> args[index] = if (strings++ == 0) SHELL_PACKAGE else null
+                type == Integer.TYPE -> args[index] = if (ints++ == 0) USER_ID else DEVICE_ID_DEFAULT
+                else -> args[index] = primitiveDefault(type)
             }
-        }.toTypedArray()
+        }
+        ArgTemplate(args, clipSlots.toIntArray(), listenerSlots.toIntArray())
+    }
+
+    private fun buildArgs(method: Method, clip: ClipData?, listener: IInterface?): Array<Any?> {
+        val template = templateFor(method)
+        if (template.clipSlots.isEmpty() && template.listenerSlots.isEmpty()) {
+            return template.args
+        }
+        val args = template.args.copyOf()
+        template.clipSlots.forEach { args[it] = clip }
+        template.listenerSlots.forEach { args[it] = listener }
+        return args
     }
 
     /** Non-null boxed default for any primitive parameter. Exposed for tests. */

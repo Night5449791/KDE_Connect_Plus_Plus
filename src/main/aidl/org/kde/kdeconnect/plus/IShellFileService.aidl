@@ -28,6 +28,13 @@ interface IShellFileService {
      */
     String stat(String path, boolean followLinks);
 
+    /**
+     * Batch variant of listDirectory + stat in a single binder round-trip. Avoids O(N) IPC when
+     * browsing directories: each returned string is a JSON object with "name" and "stat" (the
+     * latter is the same object returned by stat(), or null when attributes are unavailable).
+     */
+    String[] listDirectoryEntries(String path, boolean followLinks);
+
     /** Whether a path exists (optionally following symlinks). */
     boolean exists(String path);
 

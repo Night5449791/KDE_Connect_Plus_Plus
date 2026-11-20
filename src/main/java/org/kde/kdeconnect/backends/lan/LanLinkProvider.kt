@@ -32,11 +32,13 @@ import org.kde.kdeconnect.helpers.DeviceHelper
 import org.kde.kdeconnect.helpers.ThreadHelper
 import org.kde.kdeconnect.helpers.TrustedDevices
 import org.kde.kdeconnect.helpers.TrustedNetworkHelper
+import org.kde.kdeconnect.helpers.getLocalIpAddress
 import org.kde.kdeconnect.helpers.isPrivateAddress
 import org.kde.kdeconnect.helpers.readLineBounded
 import org.kde.kdeconnect.helpers.security.SslHelper
 import org.kde.kdeconnect.ui.CustomDevicesActivity
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -91,6 +93,15 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
     private var networkChangeJob: Job? = null
     @Volatile
     private var isStopped = true
+
+    // 省电：记录上次 mDNS 发现时的网段，只有网段变化或有未连接的可信设备才重新 discover
+    @Volatile
+    private var lastDiscoverySubnet: String? = null
+
+    // 省电：ACTION_SCREEN_ON 等广播经 KdeConnectBroadcastReceiver -> BackgroundService.ForceRefreshConnections
+    // -> onNetworkChange(null) 高频到达，5s 内的重复刷新直接跳过，避免反复重启发现与 acquire MulticastLock
+    @Volatile
+    private var lastForceRefreshTime = 0L
 
     fun hasDevice(id: String): Boolean {
         return visibleDevices.containsKey(id)
@@ -592,6 +603,8 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             if (TrustedNetworkHelper.isTrustedNetwork(context)) {
                 mdnsDiscovery.startAnnouncing()
             }
+            // 记录初始网段，避免第一次网络变化时把「本来就在同一网段」误判为网段变化
+            lastDiscoverySubnet = currentSubnetKey()
         }
 
         broadcastUdpIdentityPacket(null)
@@ -608,6 +621,14 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         if (network != null) {
             handleNetworkChange(network)
         } else {
+            // 省电去抖：亮屏(WIFI_STATE_CHANGED/CONNECTIVITY_ACTION 同理)会经 KdeConnectBroadcastReceiver
+            // -> ForceRefreshConnections -> onNetworkChange(null) 高频触发；距上次不足 5s 则跳过。
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastForceRefreshTime < FORCE_REFRESH_MIN_INTERVAL_MS) {
+                Log.d("LanLinkProvider", "Skipping redundant force refresh (< ${FORCE_REFRESH_MIN_INTERVAL_MS}ms since last)")
+                return
+            }
+            lastForceRefreshTime = now
             // Debounce refreshes without a target network
             networkChangeJob?.cancel()
             networkChangeJob = networkChangeScope.launch {
@@ -629,10 +650,34 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             } else {
                 mdnsDiscovery.stopAnnouncing() // noop if already stopped
             }
-            mdnsDiscovery.stopDiscovering()
-            mdnsDiscovery.startDiscovering()
+
+            // 省电：不再无条件 stop+start mDNS 发现（每次都会重新 acquire MulticastLock 并重置 15s 窗口）。
+            // 仅当「网段确实变化」或「有已配对但未连接的可信设备」时才重新发现，其余情况保持原会话不动。
+            val subnet = currentSubnetKey()
+            val subnetChanged = subnet != null && subnet != lastDiscoverySubnet
+            val unconnectedTrusted = hasUnconnectedTrustedDevices()
+            if (subnetChanged || unconnectedTrusted) {
+                mdnsDiscovery.stopDiscovering()
+                mdnsDiscovery.startDiscovering()
+                lastDiscoverySubnet = subnet
+                Log.d("LanLinkProvider", "Restarting mDNS discovery (subnetChanged=$subnetChanged, unconnectedTrusted=$unconnectedTrusted)")
+            }
         }
     }
+
+    /** 省电判定用的网段标识：IPv4 取 /24，IPv6 用完整地址保守处理；取不到本地地址返回 null。 */
+    private fun currentSubnetKey(): String? {
+        val address = getLocalIpAddress() ?: return null
+        if (address is Inet4Address) {
+            val bytes = address.address
+            return "${bytes[0].toInt() and 0xFF}.${bytes[1].toInt() and 0xFF}.${bytes[2].toInt() and 0xFF}"
+        }
+        return address.hostAddress
+    }
+
+    /** 是否存在已配对/可信、但当前没有 LAN 连接的设备——有则值得重新发起发现。 */
+    private fun hasUnconnectedTrustedDevices(): Boolean =
+        TrustedDevices.getAllTrustedDevices(context).any { !visibleDevices.containsKey(it) }
 
     override fun onStop() {
         //Log.i("KDE/LanLinkProvider", "onStop");
@@ -673,6 +718,8 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         private const val MAX_RATE_LIMIT_ENTRIES: Int = 255
         private const val MAX_UNPAIRED_CONNECTIONS: Int = 42
         private const val NETWORK_CHANGE_DEBOUNCE_MS: Long = 200
+        /** 无目标网络的刷新（亮屏等）最小间隔，避免频繁 acquire MulticastLock（省电） */
+        private const val FORCE_REFRESH_MIN_INTERVAL_MS: Long = 5_000L
 
         @Throws(IOException::class)
         fun openServerSocketOnFreePort(minPort: Int): ServerSocket {

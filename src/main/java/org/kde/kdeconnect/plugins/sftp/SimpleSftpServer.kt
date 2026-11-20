@@ -11,7 +11,9 @@ import android.os.Build
 import android.util.Log
 import androidx.core.net.toUri
 import org.apache.sshd.common.keyprovider.AbstractKeyPairProvider
+import org.apache.sshd.common.session.Session
 import org.apache.sshd.common.session.SessionContext
+import org.apache.sshd.common.session.SessionListener
 import org.apache.sshd.common.util.io.PathUtils
 import org.apache.sshd.common.util.security.SecurityUtils.SECURITY_PROVIDER_REGISTRARS
 import org.apache.sshd.scp.server.ScpCommandFactory
@@ -47,6 +49,8 @@ import java.security.KeyPair
 import java.security.MessageDigest
 import java.security.NoSuchAlgorithmException
 import java.security.PublicKey
+import java.util.Timer
+import java.util.TimerTask
 
 internal class SimpleSftpServer {
     private lateinit var sshd: SshServer
@@ -79,6 +83,16 @@ internal class SimpleSftpServer {
     private lateinit var nativeFileSystemFactory: NativeStorageFileSystemFactory
 
     private var shizukuMode = false
+
+    // ---- 空闲自动停止（省电）----
+    // SSH 服务启动后会在 1739 端口常驻监听并持有 NIO 线程池。桌面端关闭文件管理器后如果没有任何
+    // 连接，这些资源会一直占用并阻止系统进入 Doze。这里用 SSHD 的 SessionListener 跟踪活跃连接：
+    // 有连接时取消倒计时；连接归零（或启动后一直没有连接）时启动 IDLE_TIMEOUT_MS 倒计时，超时
+    // 调用 stop(true) 释放端口和线程。省电效果：不用文件时不再有常驻监听 socket / 线程被唤醒。
+    private val idleLock = Any()
+    @Volatile private var activeSessionCount = 0
+    private var idleTimer: Timer? = null
+    @Volatile private var serverStopping = false
 
     /** [enabled] defaults to true for compatibility; pass false when switching back to Android storage mode. */
     fun setShizukuMode(enabled: Boolean = true) {
@@ -209,10 +223,33 @@ internal class SimpleSftpServer {
         sshd.passwordAuthenticator = passwordAuth
 
         this.sshd = sshd
+
+        // SSHD 2.20.1: SessionListenerManager.addSessionListener(SessionListener)，
+        // sessionCreated/sessionClosed 均为 default 方法，只覆写这两个即可。
+        // 在 start() 之前注册，避免连接建立/拆除过程中注册导致回调顺序不确定。
+        sshd.addSessionListener(object : SessionListener {
+            override fun sessionCreated(session: Session) {
+                synchronized(idleLock) {
+                    activeSessionCount++
+                    cancelIdleTimerLocked()
+                }
+                Log.i(TAG, "SFTP session created (active=$activeSessionCount), cancelled idle-stop timer")
+            }
+
+            override fun sessionClosed(session: Session) {
+                synchronized(idleLock) {
+                    if (activeSessionCount > 0) activeSessionCount--
+                }
+                Log.i(TAG, "SFTP session closed (active=$activeSessionCount)")
+                scheduleIdleStopIfNeeded()
+            }
+        })
     }
 
     fun start(): Boolean {
         if (isStarted) return true
+
+        cancelIdleTimer()
 
         regeneratePassword()
 
@@ -220,6 +257,8 @@ internal class SimpleSftpServer {
             try {
                 sshd.port = port
                 sshd.start()
+                // 省电：启动后即使没有客户端连接也安排空闲倒计时，防止端口/线程一直常驻
+                scheduleIdleStopIfNeeded()
 
                 return true
             } catch (e: IOException) {
@@ -232,13 +271,63 @@ internal class SimpleSftpServer {
     }
 
     fun stop() {
+        cancelIdleTimer()
         if (!::sshd.isInitialized) return
 
+        synchronized(idleLock) { serverStopping = true }
         try {
             sshd.stop(true)
         } catch (e: Exception) {
             Log.e("SFTP", "Exception while stopping the server", e)
+        } finally {
+            // stop 期间可能仍有 sessionClosed 回调到达，serverStopping 阻止它们重新安排定时器
+            synchronized(idleLock) {
+                activeSessionCount = 0
+                serverStopping = false
+            }
         }
+    }
+
+    // ---- 空闲倒计时实现 ----
+    private fun scheduleIdleStopIfNeeded() {
+        synchronized(idleLock) {
+            if (activeSessionCount == 0 && isStarted && !serverStopping) {
+                scheduleIdleStopLocked()
+            }
+        }
+    }
+
+    private fun scheduleIdleStopLocked() {
+        cancelIdleTimerLocked()
+        val timer = Timer("SftpIdleStop", true) // daemon 线程，不阻止进程退出
+        idleTimer = timer
+        timer.schedule(object : TimerTask() {
+            override fun run() {
+                // 锁内只做判定并释放锁，真正的 stop() 放到锁外执行，
+                // 避免与 SSHD 关闭 session 的回调（同样需要 idleLock）互相等待。
+                val shouldStop = synchronized(idleLock) {
+                    if (activeSessionCount == 0 && isStarted && !serverStopping && idleTimer === timer) {
+                        idleTimer = null
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (shouldStop) {
+                    Log.i(TAG, "SFTP idle for ${IDLE_TIMEOUT_MS / 1000}s, stopping server to save battery")
+                    stop()
+                }
+            }
+        }, IDLE_TIMEOUT_MS)
+    }
+
+    private fun cancelIdleTimer() {
+        synchronized(idleLock) { cancelIdleTimerLocked() }
+    }
+
+    private fun cancelIdleTimerLocked() {
+        idleTimer?.cancel()
+        idleTimer = null
     }
 
     fun regeneratePassword(): String {
@@ -279,6 +368,9 @@ internal class SimpleSftpServer {
 
         private val PORT_RANGE = 1739..1764
         const val USER: String = "kdeconnect"
+
+        /** 空闲多少毫秒后停止 SFTP 服务（3 分钟），省电并允许系统进入 Doze */
+        private const val IDLE_TIMEOUT_MS = 180_000L
 
         init {
             System.setProperty(SECURITY_PROVIDER_REGISTRARS, "") // disable BouncyCastle

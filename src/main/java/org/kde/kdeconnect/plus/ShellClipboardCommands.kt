@@ -20,11 +20,20 @@ internal object ShellClipboardCommands {
 
     fun set(text: String): String = SET_PREFIX + quote(text)
 
+    /**
+     * Recognises `cmd clipboard` failure text. Some ROMs print "No shell command implementation."
+     * with exit code 0 (and stderr merged into stdout), so the exit code alone is not enough.
+     * Only the first line is inspected: multi-line clipboard text must not be mistaken for an
+     * error because a later line happens to start with "Error".
+     */
     fun isCommandError(output: String?): Boolean {
-        val message = output?.trimStart() ?: return false
-        return message.startsWith("Exception") ||
-            message.startsWith("Error") ||
-            message.startsWith("No shell command implementation")
+        val firstLine = output?.trimStart()?.lineSequence()?.firstOrNull() ?: return false
+        if (firstLine.isEmpty()) return false
+        return firstLine.startsWith("Exception", ignoreCase = true) ||
+            firstLine.startsWith("Error", ignoreCase = true) ||
+            firstLine.startsWith("No shell command implementation", ignoreCase = true) ||
+            firstLine.startsWith("Unknown command", ignoreCase = true) ||
+            firstLine.contains("not a valid command", ignoreCase = true)
     }
 
     /**

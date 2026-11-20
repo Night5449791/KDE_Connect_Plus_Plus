@@ -30,12 +30,48 @@ class ShizukuFileService : IShellFileService.Stub() {
         Files.newDirectoryStream(Paths.get(path)).use { stream ->
             stream.map { it.fileName.toString() }.toTypedArray()
         }
-    } catch (t: Throwable) {
-        Log.w(TAG, "listDirectory($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "listDirectory($path) failed", e)
+        emptyArray()
+    }
+
+    /**
+     * Batch variant of [listDirectory] + [stat]: a single directory traversal reads every entry's
+     * attributes in the shell process and returns one JSON string per entry, so browsing a large
+     * directory costs one binder round-trip instead of O(N). Each object has "name" and "stat"
+     * (the same object returned by [stat], or JSON null when attributes are unavailable).
+     */
+    override fun listDirectoryEntries(path: String, followLinks: Boolean): Array<String> = try {
+        Files.newDirectoryStream(Paths.get(path)).use { stream ->
+            val entries = mutableListOf<String>()
+            for (entry in stream) {
+                val name = entry.fileName.toString()
+                // A single unreadable/vanished entry must not fail the whole batch.
+                val stat = runCatching { statJson(entry.toString(), followLinks) }
+                    .onFailure { Log.w(TAG, "statJson($entry) failed", it) }
+                    .getOrNull()
+                entries += JSONObject().apply {
+                    put("name", name)
+                    // "stat" is a nested JSON object (per the AIDL contract), not a JSON string.
+                    put("stat", stat?.let { JSONObject(it) } ?: JSONObject.NULL)
+                }.toString()
+            }
+            entries.toTypedArray()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "listDirectoryEntries($path, followLinks=$followLinks) failed", e)
         emptyArray()
     }
 
     override fun stat(path: String, followLinks: Boolean): String? = try {
+        statJson(path, followLinks)
+    } catch (e: Exception) {
+        Log.w(TAG, "stat($path, followLinks=$followLinks) failed", e)
+        null
+    }
+
+    /** Read POSIX attributes of [path] and encode them as the JSON object returned by [stat]. */
+    private fun statJson(path: String, followLinks: Boolean): String? {
         val options = if (followLinks) {
             emptyArray<LinkOption>()
         } else {
@@ -44,7 +80,7 @@ class ShizukuFileService : IShellFileService.Stub() {
         val p = Paths.get(path)
         if (!Files.exists(p, *options)) return null
         val attrs = Files.readAttributes(p, PosixFileAttributes::class.java, *options)
-        JSONObject().apply {
+        return JSONObject().apply {
             put("size", attrs.size())
             put("directory", attrs.isDirectory)
             put("regularFile", attrs.isRegularFile)
@@ -54,29 +90,26 @@ class ShizukuFileService : IShellFileService.Stub() {
             put("owner", attrs.owner().name)
             put("group", attrs.group().name)
         }.toString()
-    } catch (t: Throwable) {
-        Log.w(TAG, "stat($path, followLinks=$followLinks) failed", t)
-        null
     }
 
     override fun exists(path: String): Boolean = try {
         Files.exists(Paths.get(path))
-    } catch (t: Throwable) {
-        Log.w(TAG, "exists($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "exists($path) failed", e)
         false
     }
 
     override fun canonicalPath(path: String): String? = try {
         Paths.get(path).toRealPath().toString()
-    } catch (t: Throwable) {
-        Log.w(TAG, "canonicalPath($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "canonicalPath($path) failed", e)
         null
     }
 
     override fun readLink(path: String): String? = try {
         Files.readSymbolicLink(Paths.get(path)).toString()
-    } catch (t: Throwable) {
-        Log.w(TAG, "readLink($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "readLink($path) failed", e)
         null
     }
 
@@ -84,32 +117,32 @@ class ShizukuFileService : IShellFileService.Stub() {
         val file = File(path)
         require(file.isAbsolute) { "path must be absolute: $path" }
         ParcelFileDescriptor.open(file, ParcelFileDescriptor.parseMode(mode))
-    } catch (t: Throwable) {
-        Log.w(TAG, "openFile($path, $mode) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "openFile($path, $mode) failed", e)
         null
     }
 
     override fun createDirectory(path: String): Boolean = try {
         Files.createDirectories(Paths.get(path))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "createDirectory($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "createDirectory($path) failed", e)
         false
     }
 
     override fun delete(path: String): Boolean = try {
         Files.delete(Paths.get(path))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "delete($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "delete($path) failed", e)
         false
     }
 
     override fun rename(from: String, to: String): Boolean = try {
         Files.move(Paths.get(from), Paths.get(to))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "rename($from, $to) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "rename($from, $to) failed", e)
         false
     }
 
@@ -120,46 +153,46 @@ class ShizukuFileService : IShellFileService.Stub() {
             Files.copy(Paths.get(from), Paths.get(to))
         }
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "copyFile($from, $to, overwrite=$overwrite) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "copyFile($from, $to, overwrite=$overwrite) failed", e)
         false
     }
 
     override fun setLastModified(path: String, time: Long): Boolean = try {
         Files.setLastModifiedTime(Paths.get(path), java.nio.file.attribute.FileTime.fromMillis(time))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "setLastModified($path, $time) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "setLastModified($path, $time) failed", e)
         false
     }
 
     override fun chmod(path: String, mode: Int): Boolean = try {
         Files.setPosixFilePermissions(Paths.get(path), modeToPermissions(mode))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "chmod($path, $mode) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "chmod($path, $mode) failed", e)
         false
     }
 
     override fun createSymlink(target: String, link: String): Boolean = try {
         Files.createSymbolicLink(Paths.get(link), Paths.get(target))
         true
-    } catch (t: Throwable) {
-        Log.w(TAG, "createSymlink($target, $link) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "createSymlink($target, $link) failed", e)
         false
     }
 
     override fun usableSpace(path: String): Long = try {
         Files.getFileStore(Paths.get(path)).usableSpace
-    } catch (t: Throwable) {
-        Log.w(TAG, "usableSpace($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "usableSpace($path) failed", e)
         0L
     }
 
     override fun totalSpace(path: String): Long = try {
         Files.getFileStore(Paths.get(path)).totalSpace
-    } catch (t: Throwable) {
-        Log.w(TAG, "totalSpace($path) failed", t)
+    } catch (e: Exception) {
+        Log.w(TAG, "totalSpace($path) failed", e)
         0L
     }
 

@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.WorkerThread
 import rikka.shizuku.Shizuku
@@ -30,17 +31,26 @@ object ShizukuFileBridge {
     private const val TAG = "KdeConnectPlus/FileBridge"
     private const val REQUEST_CODE = 0x4b46 // "KF"
     private const val BIND_TIMEOUT_MS = 3000L
+    // After a failed bind, skip the 3 s latch for this long so concurrent requests cannot pile up.
+    private const val BIND_COOLDOWN_MS = 5000L
+    private const val AVAILABILITY_TTL_MS = 2000L
 
     @Volatile private var service: IShellFileService? = null
     @Volatile private var appContext: Context? = null
     @Volatile private var registered = false
     @Volatile private var bindInFlight = false
     @Volatile private var bindLatch: CountDownLatch? = null
+    @Volatile private var bindCooldownUntil = 0L
+
+    // TTL cache for the two cheap-but-repeated Shizuku probes (ping + permission).
+    @Volatile private var cachedAt = 0L
+    @Volatile private var cachedAvailability = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder received, (re)binding file user service")
+        cachedAt = 0L // permission/ping state may have changed while Shizuku was down
         ensureBound()
     }
 
@@ -53,6 +63,7 @@ object ShizukuFileBridge {
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == REQUEST_CODE) {
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                    cachedAt = 0L // a cached "no permission" must not block the fresh bind
                     ensureBound()
                 } else {
                     Log.w(TAG, "Shizuku permission denied for file service")
@@ -66,10 +77,12 @@ object ShizukuFileBridge {
             val svc = IShellFileService.Stub.asInterface(binder)
             if (svc == null) {
                 Log.e(TAG, "connected but binder is null")
+                bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
                 bindLatch?.countDown()
                 return
             }
             service = svc
+            bindCooldownUntil = 0L // connected: clear any failure cooldown
             bindLatch?.countDown()
             Log.i(TAG, "file user service connected")
         }
@@ -78,6 +91,8 @@ object ShizukuFileBridge {
             Log.w(TAG, "file user service disconnected")
             service = null
             bindInFlight = false
+            bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
+            bindLatch?.countDown() // release waiters now instead of after the full 3 s
         }
     }
 
@@ -110,6 +125,11 @@ object ShizukuFileBridge {
     @WorkerThread
     fun listDirectory(path: String): Array<String>? =
         call<Array<String>?>(null) { it.listDirectory(path) }
+
+    /** Batch list + stat in one binder round-trip; each element is a JSON entry object. */
+    @WorkerThread
+    fun listDirectoryEntries(path: String, followLinks: Boolean): Array<String>? =
+        call<Array<String>?>(null) { it.listDirectoryEntries(path, followLinks) }
 
     @WorkerThread
     fun stat(path: String, followLinks: Boolean): String? =
@@ -176,28 +196,50 @@ object ShizukuFileBridge {
             .getOrDefault(default)
     }
 
-    /** Return the connected service, triggering a bind and waiting up to 3 s if necessary. */
+    /**
+     * Return the connected service, triggering a bind and waiting up to 3 s if necessary. While a
+     * failure cooldown is active (binder dead / bind failed) fall through immediately with null, so
+     * a burst of concurrent requests cannot each tie up a worker thread for the full timeout.
+     */
     private fun awaitService(): IShellFileService? {
         service?.let { return it }
+        if (SystemClock.elapsedRealtime() < bindCooldownUntil) return null
         ensureBound()
         val latch = bindLatch
         if (latch != null && latch.count > 0L && service == null) {
             runCatching {
                 if (!latch.await(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                     Log.w(TAG, "timed out waiting for file service binder")
+                    bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
                 }
-            }.onFailure { Log.w(TAG, "interrupted waiting for file service binder", it) }
+            }.onFailure {
+                Log.w(TAG, "interrupted waiting for file service binder", it)
+                bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
+            }
         }
         return service
     }
 
-    private fun isShizukuAvailable(): Boolean = runCatching {
-        Shizuku.pingBinder()
-    }.getOrDefault(false)
+    /**
+     * Cached result of (pingBinder && permission), refetched at most once every 2 s. Both callers
+     * share the snapshot so isAvailable()/ensureBound() no longer issue two probes per request;
+     * the third term of isAvailable() (service != null) deliberately stays uncached.
+     */
+    private fun shizukuReady(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (cachedAt > 0L && now - cachedAt < AVAILABILITY_TTL_MS) return cachedAvailability
+        val ready = runCatching { Shizuku.pingBinder() }.getOrDefault(false) &&
+            runCatching {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            }.getOrDefault(false)
+        cachedAvailability = ready
+        cachedAt = now
+        return ready
+    }
 
-    private fun hasPermission(): Boolean = runCatching {
-        Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-    }.getOrDefault(false)
+    private fun isShizukuAvailable(): Boolean = shizukuReady()
+
+    private fun hasPermission(): Boolean = shizukuReady()
 
     @Synchronized
     private fun ensureBound() {
@@ -209,6 +251,7 @@ object ShizukuFileBridge {
         // bindUserService needs Shizuku API 10 (Shizuku 12.x+).
         if (runCatching { Shizuku.getVersion() }.getOrDefault(0) < 10) {
             Log.w(TAG, "Shizuku too old for UserService, needs API 10")
+            bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
             return
         }
         bindInFlight = true
@@ -219,14 +262,15 @@ object ShizukuFileBridge {
             .daemon(true)
             .processNameSuffix("files")
             .debuggable(false)
-            // Bump when the AIDL or the service implementation changes.
-            .version(1)
+            // Bump when the AIDL or the service implementation changes (batch stat added).
+            .version(2)
         runCatching {
             Shizuku.bindUserService(args, connection)
             Log.i(TAG, "bindUserService requested for file service")
         }.onFailure {
             bindInFlight = false
             bindLatch?.countDown()
+            bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
             Log.e(TAG, "bindUserService failed for file service", it)
         }
     }
@@ -235,6 +279,7 @@ object ShizukuFileBridge {
     private fun dropService() {
         service = null
         bindInFlight = false
+        bindCooldownUntil = SystemClock.elapsedRealtime() + BIND_COOLDOWN_MS
         bindLatch?.countDown()
     }
 }
