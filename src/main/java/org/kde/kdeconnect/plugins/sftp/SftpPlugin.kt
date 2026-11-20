@@ -122,9 +122,14 @@ class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
         val pathNames = mutableListOf<String>()
 
         if (shizukuMode) {
-            // The Shizuku file proxy exposes the whole shell filesystem from "/".
-            paths.add("/")
-            pathNames.add("Root")
+            // The desktop KIO slave redirects straight into the alias when there is exactly one,
+            // so point it at internal storage (which always contains visible folders) instead of
+            // the shell root, whose listing is mostly empty on Android. The complete shell tree
+            // stays reachable by navigating up from this path over SFTP.
+            val internalStorage = "/storage/emulated/0"
+            val target = if (ShizukuFileBridge.exists(internalStorage)) internalStorage else "/"
+            paths.add(target)
+            pathNames.add(if (target == internalStorage) "Internal storage" else "Root")
         } else if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
             val storageManager = context.getSystemService<StorageManager>()!!
             for (sv in storageManager.storageVolumes) {
