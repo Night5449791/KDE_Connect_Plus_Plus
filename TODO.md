@@ -46,6 +46,15 @@
 - **防回声**：`setText` 先更新 `currentContent`；插件层再用 `lastAppliedFromRemote` 兜底。
 - **轮询间隔**：直接读取 700ms，shell 模式 1500ms（每次都要起进程）。
 
+## 省电/性能重写（2026-11-21）
+
+- **剪贴板**：从 700/1500ms 常驻轮询改为 AOSP `IOnPrimaryClipChangedListener` 事件驱动（shell 反射注册），ROM 不支持时指数退避轮询（700ms→2s→5s→10s），无 watcher/熄屏暂停；root `cmd clipboard` 错误即自锁停轮询；反射调用参数模板缓存；防回声改 8 条/30s hash 队列。
+- **看门狗**：`dumpsys activity services`（4320 次/天）改为轻量 `pidof`，间隔 20s→60s，`dumpsys` 降为 120s 一次兜底，复活命令合并为单次 exec。
+- **SFTP**：新增 `listDirectoryEntries` 批量 AIDL，目录浏览从 O(N) 次 Binder 降为 1 次；2s LRU 元数据缓存；桥接 5s 熔断避免 binder 死亡时 3s 等待风暴；UserService 版本 1→2。
+- **SFTP 服务器**：3 分钟无 session 自动 stop（`addSessionListener` 跟踪活跃数），`startBrowsing=false` 主动 stop。
+- **mDNS**：发现首个目标即释放 MulticastLock，超时 30s→15s，网段变化/未连接设备才重开 discover，刷新去抖 5s；单测同步更新。
+- CI 编译/单测通过（run 44775558669）；**均为静态改动，未真机验证功耗**。需注意：事件驱动注册在 vivo OriginOS 上可能失败并回退轮询；看门狗 pidof 依赖 comm 截断兼容；UserService 改版本后旧 daemon 进程需重启才会加载新 dex。
+
 ## 待办
 
 - [x] 创建 GitHub 仓库并推送：`Night5449791/KDE_Connect_Plus_Plus`（`master` 已同步）
