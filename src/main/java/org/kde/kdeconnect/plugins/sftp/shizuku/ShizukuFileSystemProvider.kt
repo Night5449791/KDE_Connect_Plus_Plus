@@ -121,7 +121,13 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
 
     private fun channelFrom(opened: OpenedFile): FileChannel = when (opened.mode) {
         "r" -> FileInputStream(opened.pfd.fileDescriptor).channel
-        "rw" -> RandomAccessFile(opened.pfd.fileDescriptor, "rw").channel
+        "rw" -> {
+            // RandomAccessFile has no constructor taking a FileDescriptor. Duplicate the
+            // descriptor and open it through /proc/self/fd to get a seekable read/write channel.
+            val dup = opened.pfd.dup()
+            val fd = dup.detachFd()
+            RandomAccessFile("/proc/self/fd/$fd", "rw").channel
+        }
         else -> FileOutputStream(opened.pfd.fileDescriptor).channel // "w" / "a"
     }
 
