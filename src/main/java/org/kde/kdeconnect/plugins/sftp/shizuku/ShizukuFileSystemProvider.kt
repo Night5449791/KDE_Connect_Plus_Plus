@@ -234,7 +234,7 @@ class ShizukuFileSystemProvider : FileSystemProvider() {
             val child = fileSystem.getPath(absolute, name)
             // Seed the cache so the client's LSTAT of each child needs no further binder call.
             obj.optJSONObject("stat")?.let { rememberStat(abs(child), StatInfo(it.toString())) }
-            if (filter.accept(child)) paths += child
+            if (filter.accept(child)) paths.add(child)
         }
         return object : DirectoryStream<Path> {
             override fun iterator(): MutableIterator<Path> = paths.iterator()

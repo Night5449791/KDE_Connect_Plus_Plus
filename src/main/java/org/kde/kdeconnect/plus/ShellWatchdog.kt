@@ -25,6 +25,9 @@ internal object ShellWatchdog {
     private const val MARKER = "kc-watchdog-loop"
     private const val PID_FILE = "/data/local/tmp/kc_watchdog.pid"
 
+    private val packageName: String = BuildConfig.APPLICATION_ID
+    private val serviceComponent: String = "$packageName/org.kde.kdeconnect.BackgroundService"
+
     /**
      * 轮询间隔（秒）。旧值 20s -> 4320 次/天且每次都是重量级 dumpsys；
      * 现在 60s -> 1440 次/天（1/3），且主检测换成微秒级的 pidof，耗电大幅下降。
