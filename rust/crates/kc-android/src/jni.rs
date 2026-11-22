@@ -207,8 +207,10 @@ pub extern "system" fn Java_org_kdeconnect_rust_KcNative_init<'local>(
             return 0;
         }
     };
-    // Cache the VM before anything else so early Platform callbacks are safe.
+    // Cache the VM and resolve KcBridge on this Java thread (correct class
+    // loader) before any tokio thread tries to call back into Kotlin.
     bridge::install_vm(vm);
+    bridge::install_class(&mut env);
     match build_state(&dir) {
         Ok(_) => 1,
         Err(e) => {

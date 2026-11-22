@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use jni::objects::{JClass, JString, JValue};
+use jni::objects::{GlobalRef, JClass, JString, JValue};
 use jni::sys::jint;
 use jni::{JNIEnv, JavaVM};
 use tracing::warn;
@@ -25,11 +25,28 @@ const SIG_INT_RETURN: &str = "()I";
 const SIG_STRING_BOOL: &str = "(Ljava/lang/String;)Z";
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
+/// Global reference to `KcBridge`, resolved on the Java caller thread.
+/// `FindClass` from a thread attached by `AttachCurrentThread` uses the system
+/// class loader and cannot see APK classes, so callbacks must use this ref.
+static BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
 
 /// Cache the VM handed to `KcNative.init`. Idempotent; called again on a
 /// repeated `init` is harmless.
 pub fn install_vm(vm: JavaVM) {
     let _ = VM.set(vm);
+}
+
+/// Resolve `KcBridge` while we are still on the Java thread that called JNI,
+/// and keep a global reference for all later background-thread callbacks.
+pub fn install_class(env: &mut JNIEnv<'_>) {
+    if BRIDGE_CLASS.get().is_some() {
+        return;
+    }
+    if let Ok(class) = env.find_class(CLASS) {
+        if let Ok(global) = env.new_global_ref(class) {
+            let _ = BRIDGE_CLASS.set(global);
+        }
+    }
 }
 
 fn vm() -> Option<&'static JavaVM> {
@@ -46,23 +63,25 @@ where
 {
     let vm = vm()?;
     let mut guard = vm.attach_current_thread().ok()?;
-    let env: &mut JNIEnv<'_> = &mut guard;
-    let class = match env.find_class(CLASS) {
-        Ok(class) => class,
-        Err(err) => {
-            warn!(%err, "KcBridge unavailable; dropping callback");
-            return None;
+    let global = BRIDGE_CLASS.get()?;
+    // Each callback runs in its own local-reference frame. Tokio worker
+    // threads stay attached for their whole lifetime, so without this the
+    // JNI local reference table eventually overflows and aborts the process.
+    let result = guard.with_local_frame::<_, _, jni::errors::Error>(16, |env| {
+        // SAFETY: the global ref keeps the class alive for the process
+        // lifetime; this local JClass is only used inside this frame.
+        let class = unsafe { JClass::from_raw(global.as_obj().as_raw()) };
+        let result = f(env, class);
+        if matches!(env.exception_check(), Ok(true)) {
+            if let Err(err) = env.exception_describe() {
+                warn!(%err, "cannot describe KcBridge exception");
+            }
+            let _ = env.exception_clear();
+            return Ok(None);
         }
-    };
-    let result = f(&mut *env, class);
-    if matches!(env.exception_check(), Ok(true)) {
-        if let Err(err) = env.exception_describe() {
-            warn!(%err, "cannot describe KcBridge exception");
-        }
-        let _ = env.exception_clear();
-        return None;
-    }
-    result
+        Ok(result)
+    });
+    result.ok().flatten()
 }
 
 fn call_void(method: &str) -> bool {
