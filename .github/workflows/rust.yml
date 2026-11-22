@@ -82,15 +82,33 @@ jobs:
         shell: bash -e {0}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Configure Android SDK
+        run: |
+          if [ -z "$ANDROID_HOME" ]; then
+            ANDROID_HOME=/usr/local/lib/android/sdk
+            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          fi
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$ANDROID_HOME/cmdline-tools" "$HOME/.android"
+          rm -rf "$ANDROID_HOME/cmdline-tools/latest" "$ANDROID_HOME/cmdline-tools/tmp"
+          rm -f "$HOME/.android/repositories.cfg" "$HOME/.android/repositories2-3.xml"
+          TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
+          curl -fsSL "$TOOLS_URL" -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools/tmp"
+          mv "$ANDROID_HOME/cmdline-tools/tmp/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          rm -rf "$ANDROID_HOME/cmdline-tools/tmp" /tmp/cmdline-tools.zip
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          printf 'y\n%.0s' {1..60} | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install "platforms;android-35" "platform-tools" "build-tools;35.0.0"
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --list_installed
       - name: Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
