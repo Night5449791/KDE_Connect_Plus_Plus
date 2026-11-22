@@ -1,17 +1,20 @@
-.attach_pid*
-local.properties
-/.gradle/
+# Rust workspace
+/rust/target/
+/rust/Cargo.lock.bak
+
+# Android shell build output
+/rust/android-shell/.gradle/
+/rust/android-shell/build/
+/rust/android-shell/app/build/
+/rust/android-shell/local.properties
+/rust/android-shell/app/src/main/jniLibs/
+
+# IDE / editor
 /.idea/
-/out/
-/gen/
-/bin/
-/build/
-/target/
-/classes/
 *.iml
-*.keystore
-!debug.keystore
 .directory
+.vscode/
+
+# OS / editor leftovers
+.attach_pid*
 GPUCache/
-/release/
-/.kotlin/
