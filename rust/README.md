@@ -23,7 +23,7 @@ cargo build -p kc-daemon      # headless CLI
 cargo build -p kc-android     # 本机 JNI 库（Android 目标见 CI）
 ```
 
-CI：`.github/workflows/rust.yml`（cargo test/clippy/fmt + cargo-ndk 交叉编译 arm64-v8a / armeabi-v7a / x86_64）。
+CI：`.github/workflows/rust.yml`（cargo test/clippy/fmt + cargo-ndk 交叉编译 arm64-v8a / armeabi-v7a / x86_64 + Gradle 组装 `app-debug.apk`，产物 artifact 为 `kc-android-debug-apk`）。
 
 ## 运行 headless daemon
 

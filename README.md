@@ -40,7 +40,7 @@ cargo ndk -t arm64-v8a -o android-shell/app/src/main/jniLibs build --release -p 
 cd android-shell && gradle assembleDebug
 ```
 
-CI：`.github/workflows/rust.yml`（test / clippy / fmt + cargo-ndk 交叉编译）。
+CI：`.github/workflows/rust.yml`（test / clippy / fmt + cargo-ndk 交叉编译 + Gradle 组装 debug APK）。APK 产物为 artifact `kc-android-debug-apk`，内部已包含三个 ABI 的 `libkc_android.so`。
 
 ## 与旧实现的关系
 

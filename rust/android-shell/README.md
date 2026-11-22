@@ -94,7 +94,7 @@ cargo ndk -t arm64-v8a -o android-shell/app/src/main/jniLibs build -p kc-android
 gradle assembleDebug
 ```
 
-APK 输出在 `app/build/outputs/apk/debug/app-debug.apk`。
+APK 输出在 `app/build/outputs/apk/debug/app-debug.apk`。GitHub Actions 会自动完成上述全部步骤，并把 APK 作为 artifact `kc-android-debug-apk` 上传。
 
 ## 说明与边界
 
