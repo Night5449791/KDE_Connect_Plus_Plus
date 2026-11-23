@@ -1,62 +1,78 @@
-# KDE Connect++ (Rust backend)
+# KDE Connect++ (Android)
 
-本仓库现在是 **Rust 实现的 KDE Connect Android 客户端后端 + 极薄 Kotlin UI/系统 API 适配层**。
-原先的 520 个 Kotlin/Java/AIDL 源文件（官方 KDE Connect Android 1.37.3 基线 + Shizuku 剪贴板/文件代理）
-已按要求完全删除，不再参与构建。协议行为在重写过程中已逐项映射到 Rust，详见 `rust/docs/ARCHITECTURE.md`。
+Personal build of the official KDE Connect Android app with a Shizuku-based clipboard bridge, so
+clipboard sync keeps working in the background on ROMs that block background clipboard access
+(ColorOS and similar).
 
-- 协议基线：KDE Connect protocol v8（官方 Android 1.37.3）
-- 许可证：GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL（见 `COPYING`、`LICENSES/`）
-- 上游：KDE Connect（invent.kde.org/network/kdeconnect-android）
+Upstream source is the official 1.37.3 tag. Not a fork of any "plus" project, no GitLab.
 
-## 目录
+## Differences from upstream
+
+- **Clipboard through Shizuku.** A Shizuku UserService watches and writes the primary clip with
+  the shell identity. On Android 10+ a background app cannot observe other apps' clipboard
+  writes; upstream works around that by parsing logcat with `READ_LOGS`, which most ROMs block.
+  - Shell mode (adb / wireless debugging): the service uses `ClipboardManager` directly.
+  - Root / Sui mode: uid 0 must never attach to the clipboard (Android 12+ wipes it), so the
+    service runs `cmd clipboard` instead.
+- **Auto relaunch.** The Shizuku binder-received callback rebinds the UserService and restarts
+  `BackgroundService`, so clipboard sync and device connections recover after a Shizuku or
+  system restart without opening the app.
+- **No echo.** A value written locally because a remote device sent it is not sent back.
+
+The package name stays `org.kde.kdeconnect_tp` on purpose. This build replaces the official app
+and cannot be installed alongside it: uninstall the official KDE Connect first.
+
+## Build
 
 ```
-rust/
-  crates/kc-protocol    NetworkPacket / identity / TLS / 配对
-  crates/kc-core        设备状态机 / 插件注册表 / 存储 / Platform trait
-  crates/kc-transport   LAN UDP+mDNS 发现 / TLS 1.2 链路 / payload 传输
-  crates/kc-plugins     24 个插件
-  crates/kc-daemon      headless CLI（桌面验证用）
-  crates/kc-android     JNI cdylib：拥有全部后台逻辑，推送事件给 Kotlin
-  android-shell/        极薄 Kotlin：UI + Android API 无状态适配器
-  docs/                 架构、JNI 契约
+./gradlew assembleDebug
 ```
 
-## 构建与测试
+CI is `.github/workflows/build.yml` (unit tests + debug APK on every push). It needs JDK 21 and
+Android SDK platform 37.
 
-```bash
-cd rust
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build -p kc-daemon
-```
+## On the phone
 
-Android APK 需要 NDK 与 Android SDK：
+1. Install and start [Shizuku](https://shizuku.rikka.app/) (adb or root).
+2. KDE Connect++ → clipboard plugin settings → grant Shizuku permission.
+3. The status line reads "Running. Background clipboard sync is active."
 
-```bash
-cd rust
-cargo ndk -t arm64-v8a -o android-shell/app/src/main/jniLibs build --release -p kc-android
-cd android-shell && gradle assembleDebug
-```
+Copy on either side; both directions sync without the app in the foreground.
 
-CI：`.github/workflows/rust.yml`（test / clippy / fmt + cargo-ndk 交叉编译 + Gradle 组装 debug APK）。APK 产物为 artifact `kc-android-debug-apk`，内部已包含三个 ABI 的 `libkc_android.so`。
+## License
 
-## 与旧实现的关系
+GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL, same as upstream.
 
-Rust 层实现了原 Kotlin 应用的以下后端能力：
+## (Some) Features
+- **Shared clipboard**: copy and paste between your phone and your computer (or any other device).
+- **Notification sync**: Read and reply to your Android notifications from the desktop.
+- **Share files and URLs** instantly from one device to another.
+- **Multimedia remote control**: Use your phone as a remote for Linux media players.
+- **Virtual touchpad**: Use your phone screen as your computer's touchpad and keyboard.
 
-- KDE Connect v8 线协议、UDP 1716 广播发现、TCP 1716..1764、mDNS `_kdeconnect._udp`
-- TLS 1.2 + EC P-256 自签证书 + TOFU 证书固定 + 隧道内二次 identity 交换
-- 配对状态机、8 位校验码、信任设备与插件开关持久化
-- 独立 TLS 连接的 payload 传输（1739+）
-- 原版全部 24 个插件的包体构造、解析与分发
-- Android 侧设备发现、事件循环、周期任务、UI 状态推送
+All this without wires, over the already existing Wi-Fi network, and using TLS encryption.
 
-**未移植**：蓝牙链路、Shizuku 剪贴板桥/shell 看门狗/SFTP 文件代理、原版完整 UI（翻译/主题/备份/插件设置）。
-Android 系统能力（剪贴板、通知等）由 Kotlin 无状态适配函数调用，逻辑归属见 `rust/docs/JNI_CONTRACT.md`。
+## About this app
 
-## 验证边界
+This is a native Android port of the KDE Connect Qt app. You will find a more complete readme about KDE Connect [here](https://invent.kde.org/network/kdeconnect-kde/).
 
-`cargo test --workspace --all-targets` 全部通过（含 v8 TLS 握手、payload 流、插件包体、状态机测试），
-clippy/fmt 干净，JNI 符号已验证导出。Kotlin APK 未在本机编译、未在真机运行，未做完整端到端互通测试。
+## How to install this app
+
+You can install this app from the [Play Store](https://play.google.com/store/apps/details?id=org.kde.kdeconnect_tp) as well as [F-Droid](https://f-droid.org/repository/browse/?fdid=org.kde.kdeconnect_tp). Note you will also need to install the [desktop app](https://invent.kde.org/network/kdeconnect-kde) for it to work.
+
+## Contributing
+
+A lot of useful information, including how to get started working on KDE Connect and how to connect with the current developers, is on our [KDE Community Wiki page](https://community.kde.org/KDEConnect)
+
+For bug reporting, please use [KDE's Bugzilla](https://bugs.kde.org). Please do not use the issue tracker in GitLab since we want to keep everything in one place.
+
+To contribute patches, use [KDE Connect's Gitlab](https://invent.kde.org/network/kdeconnect-android/).
+On Gitlab (as well as on our [old Phabricator](https://phabricator.kde.org/tag/kde_connect/)) you can find a task list with stuff to do and links to other relevant resources.
+It is a good idea to also subscribe to the [KDE Connect mailing list](https://mail.kde.org/mailman/listinfo/kdeconnect).
+
+Please know that all translations for all KDE apps are handled by the [localization team](https://l10n.kde.org/). If you would like to submit a translation, that should be done by working with the proper team for that language.
+
+## License
+[GNU GPL v2](https://www.gnu.org/licenses/gpl-2.0.html) and [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
+
+If you are reading this from GitHub, you should know that this is just a mirror of the [KDE Project repo](https://invent.kde.org/network/kdeconnect-android/).

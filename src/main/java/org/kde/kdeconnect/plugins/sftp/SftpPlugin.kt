@@ -1,0 +1,328 @@
+/*
+ * SPDX-FileCopyrightText: 2014 Samoilenko Yuri <kinnalru@gmail.com>
+ * SPDX-FileCopyrightText: 2024 ShellWen Chen <me@shellwen.com>
+ *
+ * SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ */
+package org.kde.kdeconnect.plugins.sftp
+
+import android.app.Activity
+import android.content.ContentResolver
+import android.content.SharedPreferences
+import android.content.SharedPreferences.OnSharedPreferenceChangeListener
+import android.net.Uri
+import android.os.Environment
+import android.os.storage.StorageManager
+import android.provider.Settings
+import androidx.core.content.getSystemService
+import androidx.core.net.toUri
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import org.kde.kdeconnect.NetworkPacket
+import org.kde.kdeconnect.helpers.JsonHelper.json
+import org.kde.kdeconnect.helpers.getLocalIpAddress
+import org.kde.kdeconnect.plus.ShizukuFileBridge
+import org.kde.kdeconnect.plugins.Plugin
+import org.kde.kdeconnect.plugins.PluginFactory.LoadablePlugin
+import org.kde.kdeconnect.ui.AlertDialogFragment
+import org.kde.kdeconnect.ui.DeviceSettingsAlertDialogFragment
+import org.kde.kdeconnect.ui.PluginSettingsFragment
+import org.kde.kdeconnect.ui.StartActivityAlertDialogFragment
+import org.kde.kdeconnect_tp.BuildConfig
+import org.kde.kdeconnect_tp.R
+import java.nio.file.Path
+
+@LoadablePlugin
+class SftpPlugin : Plugin(), OnSharedPreferenceChangeListener {
+    override val displayName: String
+        get() = context.resources.getString(R.string.pref_plugin_sftp)
+
+    override val description: String
+        get() = context.resources.getString(R.string.pref_plugin_sftp_desc)
+
+    private fun getAccessMode(): String =
+        preferences.getString(context.getString(R.string.sftp_preference_key_access_mode), ACCESS_MODE_ANDROID)
+            ?: ACCESS_MODE_ANDROID
+
+    private fun isShizukuMode(): Boolean = getAccessMode() == ACCESS_MODE_SHIZUKU
+
+    override fun checkRequiredPermissions(): Boolean {
+        return when {
+            isShizukuMode() -> ShizukuFileBridge.isAvailable()
+            SimpleSftpServer.SUPPORTS_NATIVEFS -> Environment.isExternalStorageManager()
+            else -> SftpSettingsFragment.getStorageInfoList(context, this).isNotEmpty()
+        }
+    }
+
+    override val permissionExplanationDialog: AlertDialogFragment
+        get() = when {
+            isShizukuMode() -> DeviceSettingsAlertDialogFragment.Builder()
+                .setTitle(displayName)
+                .setMessage(R.string.sftp_shizuku_permission_explanation)
+                .setPositiveButton(R.string.ok)
+                .setNegativeButton(R.string.cancel)
+                .setDeviceId(device.deviceId)
+                .setPluginKey(pluginKey)
+                .create()
+
+            SimpleSftpServer.SUPPORTS_NATIVEFS -> StartActivityAlertDialogFragment.Builder()
+                .setTitle(displayName)
+                .setMessage(R.string.sftp_manage_storage_permission_explanation)
+                .setPositiveButton(R.string.open_settings)
+                .setNegativeButton(R.string.cancel)
+                .setIntentAction(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                .setIntentUrl("package:${BuildConfig.APPLICATION_ID}")
+                .setReloadPluginsOnResult(true)
+                .create()
+
+            else -> DeviceSettingsAlertDialogFragment.Builder()
+                .setTitle(displayName)
+                .setMessage(R.string.sftp_saf_permission_explanation)
+                .setPositiveButton(R.string.ok)
+                .setNegativeButton(R.string.cancel)
+                .setDeviceId(device.deviceId)
+                .setPluginKey(pluginKey)
+                .create()
+        }
+
+    override fun onCreate() {
+        device.sendPacket(NetworkPacket(PACKET_TYPE_SFTP).apply {
+            this["serverRunning"] = false
+        })
+    }
+
+    override fun onDestroy() {
+        server.stop()
+        preferences.unregisterOnSharedPreferenceChangeListener(this)
+    }
+
+    override fun loadPluginWhenRequiredPermissionsMissing() = true
+
+    override fun onPacketReceived(np: NetworkPacket): Boolean {
+        // 桌面端明确停止浏览时主动停掉 SFTP 服务：释放 1739 端口和 NIO 线程池，让系统空闲时
+        // 可以进入 Doze（省电）。SimpleSftpServer 内部的 3 分钟空闲倒计时作为桌面端崩溃/未发送
+        // 停止包时的兜底。用 has() 区分「明确为 false」与「无此 key 的其它包」，避免误伤。
+        if (np.has("startBrowsing") && !np.getBoolean("startBrowsing")) {
+            server.stop()
+            return true
+        }
+
+        if (!np.getBoolean("startBrowsing")) return false
+
+        if (!checkRequiredPermissions()) {
+            val noPermissionsPacket = NetworkPacket(PACKET_TYPE_SFTP).apply {
+                this["errorMessage"] = context.getString(R.string.sftp_missing_permission_error)
+            }
+            device.sendPacket(noPermissionsPacket)
+            return true
+        }
+
+        val shizukuMode = isShizukuMode()
+
+        if (!server.isInitialized || server.isClosed) {
+            // Must be set before initialize() so the right FileSystemFactory is installed.
+            server.setShizukuMode(shizukuMode)
+            server.initialize(context, device)
+        }
+
+        val paths = mutableListOf<String>()
+        val pathNames = mutableListOf<String>()
+
+        if (shizukuMode) {
+            // The desktop KIO slave redirects straight into the alias when there is exactly one,
+            // so point it at internal storage (which always contains visible folders) instead of
+            // the shell root, whose listing is mostly empty on Android. The complete shell tree
+            // stays reachable by navigating up from this path over SFTP.
+            val internalStorage = "/storage/emulated/0"
+            val target = if (ShizukuFileBridge.exists(internalStorage)) internalStorage else "/"
+            paths.add(target)
+            pathNames.add(if (target == internalStorage) "Internal storage" else "Root")
+        } else if (SimpleSftpServer.SUPPORTS_NATIVEFS) {
+            val storageManager = context.getSystemService<StorageManager>()!!
+            for (sv in storageManager.storageVolumes) {
+                val directory = sv.directory ?: continue
+                pathNames.add(sv.getDescription(context))
+                paths.add(directory.path)
+            }
+            if (paths.isEmpty()) {
+                device.sendPacket(NetworkPacket(PACKET_TYPE_SFTP).apply {
+                    this["errorMessage"] = context.getString(R.string.sftp_no_storage_locations_configured)
+                })
+                return true
+            }
+            server.setNativeStorageDirs(paths.map { Path.of(it) })
+        } else {
+            val storageInfoList = SftpSettingsFragment.getStorageInfoList(context, this)
+            storageInfoList.sortBy { it.uri }
+            if (storageInfoList.isEmpty()) {
+                device.sendPacket(NetworkPacket(PACKET_TYPE_SFTP).apply {
+                    this["errorMessage"] = context.getString(R.string.sftp_no_storage_locations_configured)
+                })
+                return true
+            }
+            getPathsAndNamesForStorageInfoList(paths, pathNames, storageInfoList)
+            storageInfoList.removeChildren()
+            server.setSafStorageDirs(storageInfoList)
+        }
+
+        val localIp = getLocalIpAddress()?.hostAddress
+        if (localIp == null) {
+            device.sendPacket(NetworkPacket(PACKET_TYPE_SFTP).apply {
+                this["errorMessage"] = context.getString(R.string.sftp_could_not_determine_ip)
+            })
+            return true
+        }
+
+        if (!server.start()) {
+            return false
+        }
+
+        preferences.registerOnSharedPreferenceChangeListener(this)
+
+        device.sendPacket(NetworkPacket(PACKET_TYPE_SFTP).apply {
+            this["ip"] = localIp
+            this["port"] = server.port
+            this["user"] = SimpleSftpServer.USER
+            this["password"] = server.regeneratePassword()
+            // Kept for compatibility, in case "multiPaths" is not possible or the other end does not support it
+            this["path"] = if (paths.size == 1) paths[0] else "/"
+            if (paths.isNotEmpty()) {
+                this["multiPaths"] = paths
+                this["pathNames"] = pathNames
+            }
+        })
+
+        return true
+    }
+
+    private fun getPathsAndNamesForStorageInfoList(
+        paths: MutableList<String>,
+        pathNames: MutableList<String>,
+        storageInfoList: List<StorageInfo>
+    ) {
+        var prevInfo: StorageInfo? = null
+        val pathBuilder = StringBuilder()
+
+        for (curInfo in storageInfoList) {
+            pathBuilder.setLength(0)
+            pathBuilder.append("/")
+
+            if (prevInfo != null && curInfo.uri.toString().startsWith(prevInfo.uri.toString())) {
+                pathBuilder.append(prevInfo.displayName)
+                pathBuilder.append("/")
+                val curPath = curInfo.uri.path
+                val prevPath = prevInfo.uri.path
+                if (curPath != null && prevPath != null) {
+                    pathBuilder.append(curPath.substring(prevPath.length))
+                } else {
+                    throw RuntimeException("curInfo.uri.getPath() or parentInfo.uri.getPath() returned null")
+                }
+            } else {
+                pathBuilder.append(curInfo.displayName)
+
+                if (prevInfo == null || !curInfo.uri.toString()
+                        .startsWith(prevInfo.uri.toString())
+                ) {
+                    prevInfo = curInfo
+                }
+            }
+
+            paths.add(pathBuilder.toString())
+            pathNames.add(curInfo.displayName)
+        }
+    }
+
+    private fun MutableList<StorageInfo>.removeChildren() {
+        fun StorageInfo.isParentOf(other: StorageInfo): Boolean =
+            other.uri.toString().startsWith(this.uri.toString())
+
+        var currentParent: StorageInfo? = null
+
+        retainAll { curInfo ->
+            when {
+                currentParent == null -> {
+                    currentParent = curInfo
+                    true
+                }
+
+                currentParent!!.isParentOf(curInfo) -> {
+                    false
+                }
+
+                else -> {
+                    currentParent = curInfo
+                    true
+                }
+            }
+        }
+    }
+
+    override val supportedPacketTypes: Array<String> = arrayOf(PACKET_TYPE_SFTP_REQUEST)
+
+    override val outgoingPacketTypes: Array<String> = arrayOf(PACKET_TYPE_SFTP)
+
+    // Always show settings so the user can pick the file access mode (also on Android 11+).
+    override val hasSettings: Boolean = true
+
+    override val settingsScope = SettingsScope.PER_DEVICE
+
+    override fun getSettingsFragment(activity: Activity): PluginSettingsFragment {
+        return SftpSettingsFragment.newInstance(pluginKey, device.deviceId, R.xml.sftpplugin_preferences)
+    }
+
+    override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences, key: String?) {
+        if (key != context.getString(PREFERENCE_KEY_STORAGE_INFO_LIST) &&
+            key != context.getString(PREFERENCE_KEY_ACCESS_MODE)
+        ) return
+        if (!server.isStarted) return
+
+        server.stop()
+
+        val np = NetworkPacket(PACKET_TYPE_SFTP_REQUEST).apply {
+            this["startBrowsing"] = true
+        }
+        onPacketReceived(np)
+    }
+
+    data class StorageInfo(var displayName: String, val uri: Uri) {
+        val isFileUri: Boolean = uri.scheme == ContentResolver.SCHEME_FILE
+        val isContentUri: Boolean = uri.scheme == ContentResolver.SCHEME_CONTENT
+
+        private fun toSerialized() = SerializedStorageInfo(displayName, uri.toString())
+
+        fun serialize(): String = json.encodeToString(toSerialized())
+
+        // Persisted in the device preferences, so field names must not change
+        @Serializable
+        private class SerializedStorageInfo(
+            @SerialName("DisplayName") val displayName: String,
+            @SerialName("Uri") val uri: String,
+        ) {
+            fun toStorageInfo() = StorageInfo(displayName, uri.toUri())
+        }
+
+        companion object {
+            @Throws(SerializationException::class)
+            fun unserialize(s: String): StorageInfo = json.decodeFromString<SerializedStorageInfo>(s).toStorageInfo()
+
+            fun serializeList(list: List<StorageInfo>): String = json.encodeToString(list.map { it.toSerialized() })
+
+            @Throws(SerializationException::class)
+            fun unserializeList(s: String): List<StorageInfo> = json.decodeFromString<List<SerializedStorageInfo>>(s).map { it.toStorageInfo() }
+        }
+    }
+
+    companion object {
+        private const val PACKET_TYPE_SFTP = "kdeconnect.sftp"
+        private const val PACKET_TYPE_SFTP_REQUEST = "kdeconnect.sftp.request"
+
+        val PREFERENCE_KEY_STORAGE_INFO_LIST: Int = R.string.sftp_preference_key_storage_info_list
+        val PREFERENCE_KEY_ACCESS_MODE: Int = R.string.sftp_preference_key_access_mode
+
+        const val ACCESS_MODE_ANDROID: String = "android"
+        const val ACCESS_MODE_SHIZUKU: String = "shizuku"
+
+        private val server = SimpleSftpServer()
+    }
+}
